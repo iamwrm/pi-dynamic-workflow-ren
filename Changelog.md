@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased - 2026-07-30
+## 1.8.3 - 2026-07-30
+
+### Fixed
+- Keep stall-guard timers referenced until an attempt settles, preventing headless Node runners from exiting before a stalled attempt can be aborted and retried.
 
 ### Changed
 - Prepared the project as a standalone public Git repository under `iamwrm/pi-dynamic-workflow-ren`.

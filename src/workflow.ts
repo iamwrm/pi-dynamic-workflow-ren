@@ -562,8 +562,9 @@ export async function runWorkflow<T = unknown>(
     };
     const armStallTimer = () => {
       if (stallTimer) clearTimeout(stallTimer);
+      // Keep the guard referenced: a headless runner may be waiting only on the
+      // abort signal, and an unref'ed timer lets Node exit before it fires.
       stallTimer = setTimeout(onStall, stallTimeoutMs);
-      stallTimer.unref?.();
     };
     armStallTimer();
     const signals = [stallController.signal];
