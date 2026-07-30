@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm ci
+      - name: Check, build, typecheck, and test
+        run: npm test
+      - name: Verify generated package entrypoints
+        run: test -f dist/index.js && test -f dist/index.d.ts
+      - name: Install checkout through Pi local-path flow
+        env:
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent
+          PI_CODING_AGENT_SESSION_DIR: ${{ runner.temp }}/pi-sessions
+          PI_OFFLINE: "1"
+        run: |
+          mkdir -p "$PI_CODING_AGENT_DIR" "$PI_CODING_AGENT_SESSION_DIR"
+          ./node_modules/.bin/pi install "$GITHUB_WORKSPACE"
+          ./node_modules/.bin/pi list
+          grep -Fq "pi-dynamic-workflow-ren" "$PI_CODING_AGENT_DIR/settings.json"

@@ -1,0 +1,70 @@
+{
+  "name": "pi-dynamic-workflow-rencc",
+  "version": "1.8.2",
+  "description": "Claude-Code-style dynamic workflow orchestration for Pi, with resumable journaled runs, a runtime determinism shim, a hardened vm sandbox, and parent-session model/extension inheritance.",
+  "type": "module",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "extensions/",
+    "src/",
+    "README.md",
+    "BACKLOG.md",
+    "Changelog.md"
+  ],
+  "scripts": {
+    "test": "npm run check && npm run build && npm run typecheck:extensions && npm run test:unit",
+    "test:unit": "tsx --test tests/**/*.test.ts",
+    "check": "biome check .",
+    "format": "biome format --write .",
+    "lint": "biome lint .",
+    "build": "tsc",
+    "typecheck:extensions": "tsc -p tsconfig.extensions.json --noEmit",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "workflow",
+    "agents"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/workflow.ts"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iamwrm/pi-dynamic-workflow-ren.git"
+  },
+  "author": "michaelliv",
+  "license": "MIT",
+  "dependencies": {
+    "acorn": "^8.16.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.16",
+    "@earendil-works/pi-agent-core": "^0.80.8",
+    "@earendil-works/pi-ai": "^0.80.8",
+    "@earendil-works/pi-coding-agent": "^0.80.8",
+    "@earendil-works/pi-tui": "^0.80.8",
+    "tsx": "latest",
+    "typebox": "latest",
+    "typescript": "latest"
+  }
+}
