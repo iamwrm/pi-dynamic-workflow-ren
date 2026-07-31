@@ -448,7 +448,7 @@ test("no whole-run clock: a multi-agent run with slow (still-active) agents comp
   // all four must complete.
   const slowRunner = {
     run: async (prompt: string) => {
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      await new Promise((resolve) => setTimeout(resolve, 750));
       return `echo:${prompt}`;
     },
   };
@@ -456,9 +456,9 @@ test("no whole-run clock: a multi-agent run with slow (still-active) agents comp
     `${META}\nreturn await parallel([0,1,2,3].map((i) => () => agent('p' + i, { label: 'p' + i })))`,
     {
       agent: slowRunner,
-      // A tiny scriptTimeoutMs would have killed the run under the old whole-run
-      // deadline; it must now only bound SYNC evaluation and have no effect here.
-      scriptTimeoutMs: 5,
+      // Keep the synchronous VM watchdog comfortably above CI scheduler jitter
+      // while making the async work exceed it. A whole-run deadline would fail.
+      scriptTimeoutMs: 500,
       stallTimeoutMs: 5000,
       journalDir: tmpJournalDir(),
     },

@@ -12,18 +12,15 @@ Inspired by Anthropic's [dynamic workflows in Claude Code](https://claude.com/bl
 
 ## Install
 
-This project is distributed as a Git repository, not as an npm package. Keep a
-local checkout when you want to inspect or delegate changes:
+This project is distributed as a Git repository, not as an npm package. After
+reviewing the source, let Pi clone and manage it directly over HTTPS:
 
 ```bash
-git clone https://github.com/iamwrm/pi-dynamic-workflow-ren.git \
-  pi-dynamic-workflow-rencc
-cd pi-dynamic-workflow-rencc
-
-# Needed because pi local-path installs do not install dependencies.
-npm ci --omit=dev --legacy-peer-deps
-pi install .
+pi install https://github.com/iamwrm/pi-dynamic-workflow-ren.git
 ```
+
+Pi installs the runtime dependencies as part of this managed Git install, so no
+manual clone or `npm install` is required.
 
 Then in Pi:
 

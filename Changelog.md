@@ -4,10 +4,13 @@
 
 ### Changed
 - Updated the locked `@earendil-works/pi-*` development baseline from 0.80.8 to 0.83.0.
+- Replaced the manual clone/local-path installation instructions with Pi's direct managed HTTPS Git install.
+- CI now installs the tested commit through its HTTPS Git URL, verifies the managed checkout and runtime dependency, and uses the Node 24-based v5 GitHub actions.
 - Workflow children preserve Pi's persisted automatic-compaction setting (default enabled) and accept an explicit `autoCompaction` override through both `WorkflowAgentOptions` and the production `workflow` tool. Caller-provided settings managers must be paired with their already-loaded resource loader so reload cannot erase in-memory overrides.
 - Successful terminal one-shot turns skip threshold compaction because no later prompt can consume the summary; overflow recovery and pre-follow-up compaction remain enabled. Supported Codex/Fluxion models still delegate overflow compaction to an inherited server adapter such as `ren-public-package` `0017`, with ordinary readable Pi compaction as the fallback.
 
 ### Fixed
+- Removed a CI scheduling flake from the no-whole-run-clock regression by giving synchronous VM startup a realistic watchdog while keeping the simulated async work longer than that watchdog.
 - Gave each default child attempt its own offline `ModelRuntime`, preventing parallel stateful provider decorators/native-compaction adapters from overwriting sibling request snapshots.
 - Reject exhausted provider errors, aborted/truncated responses, and missing terminal text instead of returning stale/empty assistant output and journaling a false success.
 - Abort active compaction and branch summarization together with the agent loop so stall retries, kills, and shutdown do not wait for an adapter timeout.

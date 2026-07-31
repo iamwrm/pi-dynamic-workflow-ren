@@ -10,8 +10,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
       - name: Install dependencies
@@ -20,13 +20,22 @@ jobs:
         run: npm test
       - name: Verify generated package entrypoints
         run: test -f dist/index.js && test -f dist/index.d.ts
-      - name: Install checkout through Pi local-path flow
+      - name: Install tested revision through Pi's HTTPS Git flow
         env:
           PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent
           PI_CODING_AGENT_SESSION_DIR: ${{ runner.temp }}/pi-sessions
           PI_OFFLINE: "1"
+          GIT_TERMINAL_PROMPT: "0"
+          INSTALL_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          INSTALL_REF: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           mkdir -p "$PI_CODING_AGENT_DIR" "$PI_CODING_AGENT_SESSION_DIR"
-          ./node_modules/.bin/pi install "$GITHUB_WORKSPACE"
+          package_source="https://github.com/${INSTALL_REPOSITORY}.git@${INSTALL_REF}"
+          install_dir="$PI_CODING_AGENT_DIR/git/github.com/$INSTALL_REPOSITORY"
+
+          ./node_modules/.bin/pi install "$package_source"
           ./node_modules/.bin/pi list
-          grep -Fq "pi-dynamic-workflow-ren" "$PI_CODING_AGENT_DIR/settings.json"
+
+          grep -Fq "$package_source" "$PI_CODING_AGENT_DIR/settings.json"
+          test "$(git -C "$install_dir" rev-parse HEAD)" = "$INSTALL_REF"
+          test -f "$install_dir/node_modules/acorn/package.json"
