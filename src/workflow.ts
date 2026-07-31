@@ -695,7 +695,8 @@ export async function runWorkflow<T = unknown>(
           `${String(ordinal).padStart(3, "0")}-${transcriptSlug(label)}${attempt > 1 ? `.retry${attempt}` : ""}.messages.jsonl`,
         );
 
-      let telemetry: WorkflowAgentTelemetry | undefined;
+      let attemptTelemetry: WorkflowAgentTelemetry | undefined;
+      let cumulativeTelemetry: WorkflowAgentTelemetry | undefined;
       const agentStarted = Date.now();
       let worktree: WorktreeLease | undefined;
       try {
@@ -742,7 +743,10 @@ export async function runWorkflow<T = unknown>(
           ...(worktree ? { cwd: worktree.cwd } : {}),
           ...(agentType?.toolNames?.length ? { toolNames: agentType.toolNames } : {}),
           onTelemetry(event: WorkflowAgentTelemetry) {
-            telemetry = event;
+            // WorkflowAgent reports once in its finally. Keep only the latest
+            // callback for this attempt, then fold it into the cumulative total
+            // exactly once after runAttempt settles.
+            attemptTelemetry = event;
           },
           onFeedEvent: feedState.onFeedEvent,
           onSessionHandle: (handle: WorkflowAgentSessionHandle) => {
@@ -765,12 +769,10 @@ export async function runWorkflow<T = unknown>(
               live: false,
               getMessages: () => capped,
               ...(persisted ? { messagesPath: persisted } : {}),
-              // Take the pi child session path from TELEMETRY, not the live handle:
-              // agent.run's finally fires onTelemetry (existsSync-verified) before
-              // onSessionEnd, so this only keeps paths that actually flushed. An
-              // attempt that failed before its first assistant message never wrote
-              // the file, and pi silently opens a BLANK session at such paths.
-              ...(telemetry?.sessionFile ? { sessionFile: telemetry.sessionFile } : {}),
+              // Take the pi child session path from THIS ATTEMPT's telemetry, not
+              // the live handle or cumulative prior attempts: agent.run's finally
+              // fires onTelemetry (existsSync-verified) before onSessionEnd.
+              ...(attemptTelemetry?.sessionFile ? { sessionFile: attemptTelemetry.sessionFile } : {}),
               ...(prior?.model ? { model: prior.model } : {}),
               ...(prior?.thinkingLevel ? { thinkingLevel: prior.thinkingLevel } : {}),
             });
@@ -780,13 +782,29 @@ export async function runWorkflow<T = unknown>(
         // Stall-retry loop (Claude Code: up to 5 retries per agent on stall).
         let result: unknown;
         for (let attemptNo = 0; ; attemptNo++) {
-          const attempt = await runAttempt(
-            prompt,
-            attemptNo > 0
-              ? { ...runnerOptions, sessionName: `${sessionNameBase} · retry${attemptNo + 1}` }
-              : runnerOptions,
-            killState,
-          );
+          attemptTelemetry = undefined;
+          const attemptStarted = Date.now();
+          let attempt: Awaited<ReturnType<typeof runAttempt>> | undefined;
+          try {
+            attempt = await runAttempt(
+              prompt,
+              attemptNo > 0
+                ? { ...runnerOptions, sessionName: `${sessionNameBase} · retry${attemptNo + 1}` }
+                : runnerOptions,
+              killState,
+            );
+          } finally {
+            // Charge every attempted session, including compacted-away usage and
+            // stalled attempts. A custom runner that supplies no telemetry keeps
+            // the legacy result-size estimate for a successful attempt.
+            const completedAttemptTelemetry =
+              attemptTelemetry ??
+              (attempt?.ok ? completeTelemetry(attempt.result, undefined, attemptStarted) : undefined);
+            if (completedAttemptTelemetry) {
+              cumulativeTelemetry = mergeTelemetry(cumulativeTelemetry, completedAttemptTelemetry);
+            }
+          }
+          if (!attempt) throw new Error("subagent attempt ended without an outcome");
           if (attempt.ok) {
             result = attempt.result;
             break;
@@ -803,7 +821,7 @@ export async function runWorkflow<T = unknown>(
         }
 
         throwIfAborted();
-        const finalTelemetry = completeTelemetry(result, telemetry, agentStarted);
+        const finalTelemetry = completeTelemetry(result, cumulativeTelemetry, agentStarted);
         journal.append(key, result, finalTelemetry);
         recordTelemetry(state, finalTelemetry);
         feedState.finish(`done (${finalTelemetry.tokens ?? 0} tok, ${finalTelemetry.toolCalls} tools)`);
@@ -812,7 +830,7 @@ export async function runWorkflow<T = unknown>(
       } catch (error) {
         // A real whole-run abort (Esc) or the maxAgents fatal must propagate.
         if (state.fatal || options.signal?.aborted) throw error;
-        const finalTelemetry = completeTelemetry(null, telemetry, agentStarted);
+        const finalTelemetry = completeTelemetry(null, cumulativeTelemetry, agentStarted);
         recordTelemetry(state, finalTelemetry);
         // Kills, stall exhaustion, and other failures are recoverable: this agent
         // resolves to null and is NOT journaled, so a resume re-runs it.
@@ -1308,6 +1326,34 @@ function buildAgentInstructions(
   }
   if (options.model && !resolved.modelResolved) lines.push(`Requested model hint: ${options.model}`);
   return lines.length ? lines.join("\n") : undefined;
+}
+
+function mergeTelemetry(
+  total: WorkflowAgentTelemetry | undefined,
+  next: WorkflowAgentTelemetry,
+): WorkflowAgentTelemetry {
+  const totalTokens = total?.tokens ?? total?.usage?.totalTokens;
+  const nextTokens = next.tokens ?? next.usage?.totalTokens;
+  let usage: WorkflowAgentUsage | undefined;
+  if (total?.usage || next.usage) {
+    usage = emptyUsage();
+    if (total?.usage) addUsage(usage, total.usage);
+    if (next.usage) addUsage(usage, next.usage);
+  }
+  return {
+    ...(usage ? { usage } : {}),
+    ...(totalTokens !== undefined || nextTokens !== undefined
+      ? { tokens: (totalTokens ?? 0) + (nextTokens ?? 0) }
+      : {}),
+    ...(total?.estimatedTokens || next.estimatedTokens ? { estimatedTokens: true } : {}),
+    ...(next.sessionFile
+      ? { sessionFile: next.sessionFile }
+      : total?.sessionFile
+        ? { sessionFile: total.sessionFile }
+        : {}),
+    toolCalls: (total?.toolCalls ?? 0) + next.toolCalls,
+    elapsedMs: (total?.elapsedMs ?? 0) + next.elapsedMs,
+  };
 }
 
 function completeTelemetry(

@@ -195,6 +195,53 @@ return { spent: budget.spent(), remaining: budget.remaining() }`,
   assert.equal(result.tokenUsage?.input, 30);
 });
 
+test("stall retries accumulate usage from every attempt", async () => {
+  let attempts = 0;
+  const metered = (totalTokens: number) => ({
+    usage: {
+      input: totalTokens,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens,
+      cost: { input: totalTokens / 1000, output: 0, cacheRead: 0, cacheWrite: 0, total: totalTokens / 1000 },
+    },
+    tokens: totalTokens,
+    toolCalls: 1,
+    elapsedMs: 5,
+  });
+  const runner = {
+    run: async (
+      _prompt: string,
+      options?: { signal?: AbortSignal; onTelemetry?: (telemetry: ReturnType<typeof metered>) => void },
+    ) => {
+      attempts++;
+      if (attempts === 1) {
+        await new Promise<void>((resolve) =>
+          options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        options?.onTelemetry?.(metered(100));
+        throw new Error("stalled");
+      }
+      options?.onTelemetry?.(metered(10));
+      return "recovered";
+    },
+  };
+
+  const result = await runWorkflow<number>(`${META}\nawait agent('metered retry')\nreturn budget.spent()`, {
+    agent: runner,
+    journalDir: tmpJournalDir(),
+    stallTimeoutMs: 30,
+    stallRetries: 1,
+  });
+
+  assert.equal(attempts, 2);
+  assert.equal(result.result, 110);
+  assert.equal(result.spentTokens, 110);
+  assert.equal(result.tokenUsage?.totalTokens, 110);
+  assert.equal(result.tokenUsage?.cost.total, 0.11);
+});
+
 test("resume/journaling replays persisted token telemetry without re-spawning", async () => {
   const journalDir = tmpJournalDir();
   const script = `${META}

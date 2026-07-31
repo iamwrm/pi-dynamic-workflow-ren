@@ -12,6 +12,7 @@ import {
   getAgentDir,
   type LoadExtensionsResult,
   ModelRuntime,
+  type SessionEntry,
   SessionManager,
   SettingsManager,
   type ToolDefinition,
@@ -146,7 +147,11 @@ export interface WorkflowAgentOptions {
   cwd?: string;
   /** Extra tools available to the subagent in addition to the structured output tool. */
   tools?: ToolDefinition[];
-  /** Override any createAgentSession option (model, modelRuntime, resourceLoader, etc.). */
+  /**
+   * Override createAgentSession options (model, modelRuntime, resourceLoader, etc.).
+   * A caller-provided settingsManager must be paired with a resourceLoader so
+   * WorkflowAgent never reloads and destroys caller-owned in-memory overrides.
+   */
   session?: Partial<CreateAgentSessionOptions>;
   /** Extra system guidance prepended to every subagent task. */
   instructions?: string;
@@ -164,6 +169,11 @@ export interface WorkflowAgentOptions {
    * subagents run on an in-memory SessionManager as before.
    */
   sessionPersistence?: WorkflowAgentSessionPersistence;
+  /**
+   * Override Pi's automatic compaction setting in child sessions. When omitted,
+   * the inherited/persisted Pi setting is preserved (Pi defaults it to true).
+   */
+  autoCompaction?: boolean;
 }
 
 export interface WorkflowAgentUsage {
@@ -334,20 +344,25 @@ export class WorkflowAgent {
   private readonly projectTrusted: boolean;
   private readonly structuredOutputRetries: number;
   private readonly sessionPersistence?: WorkflowAgentSessionPersistence;
-  /** Shared, offline-initialized child runtime; avoids one catalog refresh per parallel agent. */
-  private childModelRuntime?: Promise<ModelRuntime>;
+  private readonly autoCompaction?: boolean;
 
   constructor(options: WorkflowAgentOptions = {}) {
     this.cwd = options.cwd ?? process.cwd();
     this.toolsProvided = options.tools != null;
     this.baseTools = options.tools ?? createCodingTools(this.cwd);
     this.sessionOptions = options.session ?? {};
+    if (this.sessionOptions.settingsManager && !this.sessionOptions.resourceLoader) {
+      throw new TypeError(
+        "WorkflowAgent session.settingsManager requires a paired session.resourceLoader so caller-owned overrides are not erased by resource reload",
+      );
+    }
     this.instructions = options.instructions;
     this.model = options.model;
     this.thinkingLevel = options.thinkingLevel;
     this.projectTrusted = options.projectTrusted ?? true;
     this.structuredOutputRetries = options.structuredOutputRetries ?? DEFAULT_STRUCTURED_OUTPUT_RETRIES;
     this.sessionPersistence = options.sessionPersistence;
+    this.autoCompaction = options.autoCompaction;
   }
 
   async run<TSchemaDef extends TSchema | undefined = undefined>(
@@ -401,29 +416,22 @@ export class WorkflowAgent {
     const resourceLoader =
       this.sessionOptions.resourceLoader ?? createSubagentResourceLoader(sessionCwd, agentDir, settingsManager);
     if (!this.sessionOptions.resourceLoader) await resourceLoader.reload();
-    // Pi 0.80.8 makes ModelRuntime.create() async and refreshes configured model
-    // catalogs by default. A workflow can start many child sessions concurrently,
-    // so creating the default runtime inside every attempt causes a refresh herd.
-    // Child sessions share one runtime initialized from the same auth/models files
-    // with networking disabled; extension provider registrations are still applied
-    // by each AgentSession as its inherited resource loader is bound.
-    let modelRuntime = this.sessionOptions.modelRuntime;
-    if (!modelRuntime) {
-      let childModelRuntime = this.childModelRuntime;
-      if (!childModelRuntime) {
-        childModelRuntime = ModelRuntime.create({
-          authPath: join(agentDir, "auth.json"),
-          modelsPath: join(agentDir, "models.json"),
-          allowModelNetwork: false,
-        });
-        this.childModelRuntime = childModelRuntime;
-      }
-      modelRuntime = await childModelRuntime;
-    }
-    // Resource reload re-reads settings, so apply the child-only override after
-    // reload. A caller-provided settings manager remains entirely caller-owned.
-    if (!this.sessionOptions.settingsManager) {
-      settingsManager.applyOverrides({ compaction: { enabled: false } });
+    // Extension provider decorators can own mutable per-session state (the native
+    // server-compaction adapter does). Give every child attempt its own offline
+    // runtime so parallel children cannot replace one another's decorator state.
+    // An explicitly injected runtime remains caller-owned.
+    const modelRuntime =
+      this.sessionOptions.modelRuntime ??
+      (await ModelRuntime.create({
+        authPath: join(agentDir, "auth.json"),
+        modelsPath: join(agentDir, "models.json"),
+        allowModelNetwork: false,
+      }));
+    // Resource reload re-reads persisted settings. Only apply a compaction value
+    // when the caller explicitly supplied one; otherwise preserve persisted false
+    // as well as Pi's normal default-true behavior.
+    if (this.autoCompaction !== undefined) {
+      settingsManager.applyOverrides({ compaction: { enabled: this.autoCompaction } });
     }
 
     const { session } = await createAgentSession({
@@ -440,7 +448,18 @@ export class WorkflowAgent {
     });
 
     let removeAbortListener: (() => void) | undefined;
-    let unsubscribeActivity: (() => void) | undefined;
+    let unsubscribeSession: (() => void) | undefined;
+    let terminalCompactionSuppressed = false;
+    const suppressTerminalCompaction = () => {
+      if (terminalCompactionSuppressed || !settingsManager.getCompactionEnabled()) return;
+      settingsManager.applyOverrides({ compaction: { enabled: false } });
+      terminalCompactionSuppressed = true;
+    };
+    const restoreTerminalCompaction = () => {
+      if (!terminalCompactionSuppressed) return;
+      settingsManager.applyOverrides({ compaction: { enabled: true } });
+      terminalCompactionSuppressed = false;
+    };
     try {
       if (options.signal?.aborted) throw new Error("Subagent was aborted");
       try {
@@ -458,75 +477,116 @@ export class WorkflowAgent {
       } catch {
         // Session handles are advisory; a throwing consumer must not break the run.
       }
-      if (options.onActivity || options.onFeedEvent) {
-        // Every session event (text/thinking deltas, tool execution, turn lifecycle)
-        // counts as progress for stall detection, and selected events are formatted
-        // into the activity feed. Both callbacks are advisory: they must never break
-        // the subagent run.
-        const notifyActivity = options.onActivity;
-        const onFeed = options.onFeedEvent;
-        unsubscribeActivity = session.subscribe((event) => {
-          try {
-            notifyActivity?.();
-          } catch {
-            /* stall-timer reset is best-effort */
-          }
-          if (!onFeed) return;
-          try {
-            switch (event.type) {
-              case "tool_execution_start":
-                onFeed({ kind: "tool_start", toolName: event.toolName, argsPreview: feedArgsPreview(event.args) });
-                break;
-              case "tool_execution_end":
-                if (event.isError) {
-                  onFeed({
-                    kind: "tool_error",
-                    toolName: event.toolName,
-                    errorPreview: feedResultPreview(event.result),
-                  });
-                }
-                break;
-              case "message_update": {
-                const assistantEvent = event.assistantMessageEvent as { type?: string; delta?: unknown } | undefined;
-                if (assistantEvent?.type === "text_delta" && typeof assistantEvent.delta === "string") {
-                  onFeed({ kind: "text_delta", delta: assistantEvent.delta });
-                }
-                break;
-              }
-              case "message_end": {
-                const text = assistantMessageText(event.message);
-                if (text) onFeed({ kind: "assistant_text", text });
-                break;
-              }
-              default:
-                break;
+
+      // Every event counts as progress for stall detection. The same subscription
+      // suppresses post-success threshold compaction: a one-shot child has no next
+      // prompt that could use that summary. Error/overflow turns remain enabled,
+      // and a queued continuation restores compaction as soon as its agent run starts.
+      const notifyActivity = options.onActivity;
+      const onFeed = options.onFeedEvent;
+      unsubscribeSession = session.subscribe((event) => {
+        try {
+          notifyActivity?.();
+        } catch {
+          /* stall-timer reset is best-effort */
+        }
+        try {
+          if (event.type === "agent_start") {
+            restoreTerminalCompaction();
+          } else if (event.type === "message_end") {
+            const assistant = event.message as Partial<AssistantMessage>;
+            if (assistant.role === "assistant" && assistant.stopReason === "stop") {
+              suppressTerminalCompaction();
             }
-          } catch {
-            /* feed capture is best-effort */
+          } else if (
+            event.type === "tool_execution_end" &&
+            event.toolName === "structured_output" &&
+            !event.isError &&
+            capture.called
+          ) {
+            // structured_output terminates on its tool result, so its final
+            // assistant has stopReason=toolUse rather than stop.
+            suppressTerminalCompaction();
           }
-        });
-      }
+        } catch {
+          /* terminal compaction suppression is best-effort */
+        }
+        if (!onFeed) return;
+        try {
+          switch (event.type) {
+            case "tool_execution_start":
+              onFeed({ kind: "tool_start", toolName: event.toolName, argsPreview: feedArgsPreview(event.args) });
+              break;
+            case "tool_execution_end":
+              if (event.isError) {
+                onFeed({
+                  kind: "tool_error",
+                  toolName: event.toolName,
+                  errorPreview: feedResultPreview(event.result),
+                });
+              }
+              break;
+            case "message_update": {
+              const assistantEvent = event.assistantMessageEvent as { type?: string; delta?: unknown } | undefined;
+              if (assistantEvent?.type === "text_delta" && typeof assistantEvent.delta === "string") {
+                onFeed({ kind: "text_delta", delta: assistantEvent.delta });
+              }
+              break;
+            }
+            case "message_end": {
+              const text = assistantMessageText(event.message);
+              if (text) onFeed({ kind: "assistant_text", text });
+              break;
+            }
+            default:
+              break;
+          }
+        } catch {
+          /* feed capture is best-effort */
+        }
+      });
+
       if (options.signal) {
-        // Swallow any rejection from abort(): it awaits the agent becoming idle,
-        // which can fail mid-stream, and this fires precisely during cancellation
-        // (Esc / shutdown) where the run is being torn down anyway. A bare `void`
-        // would surface that as an unhandledRejection on the process.
+        // AgentSession.abort() does not cancel compaction. Abort both operations so
+        // a stalled/killed child cannot sit in a native adapter's timeout before the
+        // workflow retry starts. Swallow abort() rejection during teardown.
+        let abortStarted = false;
         const onAbort = () => {
+          if (abortStarted) return;
+          abortStarted = true;
+          session.abortCompaction();
+          session.abortBranchSummary();
           session.abort().catch(() => {});
         };
         options.signal.addEventListener("abort", onAbort, { once: true });
         removeAbortListener = () => options.signal?.removeEventListener("abort", onAbort);
+        // Close the addEventListener race: an already-aborted signal does not fire
+        // a newly attached listener.
+        if (options.signal.aborted) onAbort();
       }
 
-      await session.prompt(this.buildPrompt(prompt, options as AgentRunOptions<any>, Boolean(options.schema)));
-      if (options.signal?.aborted) throw new Error("Subagent was aborted");
+      const promptSession = async (text: string): Promise<AssistantMessage> => {
+        const priorEntryIds = new Set(sessionManager.getEntries().map((entry) => entry.id));
+        try {
+          await session.prompt(text);
+        } finally {
+          restoreTerminalCompaction();
+        }
+        if (options.signal?.aborted) throw new Error("Subagent was aborted");
+        const terminal = this.currentTerminalAssistant(sessionManager.getBranch(), priorEntryIds);
+        if (!terminal) throw new Error("Subagent completed without an assistant response");
+        this.assertTerminalAssistant(terminal);
+        return terminal;
+      };
+
+      const terminal = await promptSession(
+        this.buildPrompt(prompt, options as AgentRunOptions<any>, Boolean(options.schema)),
+      );
 
       if (options.schema) {
         // Re-prompt with a firm nudge if the subagent forgot to call structured_output.
         for (let attempt = 0; !capture.called && attempt < this.structuredOutputRetries; attempt++) {
-          if (options.signal?.aborted) throw new Error("Subagent was aborted");
-          await session.prompt(STRUCTURED_OUTPUT_NUDGE);
-          if (options.signal?.aborted) throw new Error("Subagent was aborted");
+          await promptSession(STRUCTURED_OUTPUT_NUDGE);
         }
         if (!capture.called) {
           throw new Error(
@@ -536,12 +596,18 @@ export class WorkflowAgent {
         return capture.value as AgentRunResult<TSchemaDef>;
       }
 
-      return this.lastAssistantText(session.messages) as AgentRunResult<TSchemaDef>;
+      if (terminal.stopReason !== "stop") {
+        throw new Error(`Subagent ended without a final text response (stopReason=${terminal.stopReason})`);
+      }
+      const text = this.assistantText(terminal);
+      if (!text.trim()) throw new Error("Subagent completed without a text response");
+      return text as AgentRunResult<TSchemaDef>;
     } finally {
-      unsubscribeActivity?.();
+      restoreTerminalCompaction();
+      unsubscribeSession?.();
       removeAbortListener?.();
       try {
-        const telemetry = collectTelemetry(session.messages, Date.now() - started);
+        const telemetry = collectTelemetry(sessionManager.getEntries(), Date.now() - started);
         // Only report a session file that actually exists: the JSONL is flushed on
         // the first assistant message, so an attempt that died earlier has none.
         if (subagentSessionFile && existsSync(subagentSessionFile)) telemetry.sessionFile = subagentSessionFile;
@@ -594,30 +660,46 @@ export class WorkflowAgent {
     return parts.join("\n\n");
   }
 
-  private lastAssistantText(messages: unknown[]): string {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const message = messages[i] as Partial<AssistantMessage> | undefined;
-      if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
-      const text = message.content
-        .filter((part): part is TextContent => part.type === "text")
-        .map((part) => part.text)
-        .join("");
-      if (text.trim()) return text;
+  private currentTerminalAssistant(
+    entries: readonly SessionEntry[],
+    priorEntryIds: ReadonlySet<string>,
+  ): AssistantMessage | undefined {
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (priorEntryIds.has(entry.id) || entry.type !== "message") continue;
+      const message = entry.message as Partial<AssistantMessage>;
+      if (message.role === "assistant" && Array.isArray(message.content)) return message as AssistantMessage;
     }
-    return "";
+    return undefined;
+  }
+
+  private assertTerminalAssistant(message: AssistantMessage): void {
+    if (message.stopReason === "error") {
+      throw new Error(`Subagent provider failed: ${message.errorMessage?.trim() || "unknown provider error"}`);
+    }
+    if (message.stopReason === "aborted") throw new Error("Subagent was aborted");
+    if (message.stopReason === "pending") throw new Error("Subagent returned an incomplete pending response");
+    if (message.stopReason === "length") throw new Error("Subagent response was truncated at the model output limit");
+  }
+
+  private assistantText(message: AssistantMessage): string {
+    return message.content
+      .filter((part): part is TextContent => part.type === "text")
+      .map((part) => part.text)
+      .join("");
   }
 }
 
-function collectTelemetry(messages: unknown[], elapsedMs: number): WorkflowAgentTelemetry {
-  const usage = sumUsage(messages);
+function collectTelemetry(entries: readonly SessionEntry[], elapsedMs: number): WorkflowAgentTelemetry {
+  const usage = sumUsage(entries);
   return {
     ...(usage ? { usage, tokens: usage.totalTokens } : {}),
-    toolCalls: countToolCalls(messages),
+    toolCalls: countToolCalls(entries),
     elapsedMs,
   };
 }
 
-function sumUsage(messages: unknown[]): WorkflowAgentUsage | undefined {
+function sumUsage(entries: readonly SessionEntry[]): WorkflowAgentUsage | undefined {
   let sawUsage = false;
   const total: WorkflowAgentUsage = {
     input: 0,
@@ -628,20 +710,26 @@ function sumUsage(messages: unknown[]): WorkflowAgentUsage | undefined {
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
   };
 
-  for (const message of messages) {
-    const maybe = message as Partial<AssistantMessage> | undefined;
-    if (maybe?.role !== "assistant" || !isUsage(maybe.usage)) continue;
+  for (const entry of entries) {
+    let usage: unknown;
+    if (entry.type === "message") {
+      const message = entry.message as Partial<AssistantMessage> & { usage?: unknown };
+      if (message.role === "assistant" || message.role === "toolResult") usage = message.usage;
+    } else if (entry.type === "compaction" || entry.type === "branch_summary") {
+      usage = entry.usage;
+    }
+    if (!isUsage(usage)) continue;
     sawUsage = true;
-    total.input += maybe.usage.input;
-    total.output += maybe.usage.output;
-    total.cacheRead += maybe.usage.cacheRead;
-    total.cacheWrite += maybe.usage.cacheWrite;
-    total.totalTokens += maybe.usage.totalTokens;
-    total.cost.input += maybe.usage.cost.input;
-    total.cost.output += maybe.usage.cost.output;
-    total.cost.cacheRead += maybe.usage.cost.cacheRead;
-    total.cost.cacheWrite += maybe.usage.cost.cacheWrite;
-    total.cost.total += maybe.usage.cost.total;
+    total.input += usage.input;
+    total.output += usage.output;
+    total.cacheRead += usage.cacheRead;
+    total.cacheWrite += usage.cacheWrite;
+    total.totalTokens += usage.totalTokens;
+    total.cost.input += usage.cost.input;
+    total.cost.output += usage.cost.output;
+    total.cost.cacheRead += usage.cost.cacheRead;
+    total.cost.cacheWrite += usage.cost.cacheWrite;
+    total.cost.total += usage.cost.total;
   }
 
   return sawUsage ? total : undefined;
@@ -665,6 +753,6 @@ function isUsage(value: unknown): value is Usage {
   );
 }
 
-function countToolCalls(messages: unknown[]): number {
-  return messages.filter((message) => (message as { role?: unknown } | undefined)?.role === "toolResult").length;
+function countToolCalls(entries: readonly SessionEntry[]): number {
+  return entries.filter((entry) => entry.type === "message" && entry.message.role === "toolResult").length;
 }

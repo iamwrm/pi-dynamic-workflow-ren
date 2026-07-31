@@ -138,6 +138,12 @@ const workflowToolSchema = Type.Object({
   args: Type.Optional(
     Type.Any({ description: "Optional JSON value exposed to the workflow script as global `args`." }),
   ),
+  autoCompaction: Type.Optional(
+    Type.Boolean({
+      description:
+        "Override automatic compaction for child sessions. Omit to preserve Pi's persisted setting (enabled by default).",
+    }),
+  ),
   runId: Type.Optional(
     Type.String({ description: "Optional run id to use for a new workflow journal. Generated when omitted." }),
   ),
@@ -151,6 +157,7 @@ export type WorkflowToolInput = {
   scriptPath?: string;
   name?: string;
   args?: unknown;
+  autoCompaction?: boolean;
   runId?: string;
   resumeFromRunId?: string;
 };
@@ -444,6 +451,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
             model: inheritedModel,
             thinkingLevel: inheritedThinkingLevel,
             projectTrusted: inheritedProjectTrusted,
+            ...(params.autoCompaction !== undefined ? { autoCompaction: params.autoCompaction } : {}),
             resolveModel,
             resolveAgentType,
             resolveWorkflow,
@@ -742,6 +750,9 @@ function normalizeWorkflowToolArgs(args: unknown): WorkflowToolInput {
   }
   for (const key of provided) {
     if (typeof value[key] !== "string") throw new Error(`workflow \`${key}\` must be a string`);
+  }
+  if (value.autoCompaction !== undefined && typeof value.autoCompaction !== "boolean") {
+    throw new Error("workflow `autoCompaction` must be a boolean when provided");
   }
   if (value.runId !== undefined && typeof value.runId !== "string") {
     throw new Error("workflow `runId` must be a string when provided");

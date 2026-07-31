@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.8.4 - 2026-07-31
+
+### Changed
+- Updated the locked `@earendil-works/pi-*` development baseline from 0.80.8 to 0.83.0.
+- Workflow children preserve Pi's persisted automatic-compaction setting (default enabled) and accept an explicit `autoCompaction` override through both `WorkflowAgentOptions` and the production `workflow` tool. Caller-provided settings managers must be paired with their already-loaded resource loader so reload cannot erase in-memory overrides.
+- Successful terminal one-shot turns skip threshold compaction because no later prompt can consume the summary; overflow recovery and pre-follow-up compaction remain enabled. Supported Codex/Fluxion models still delegate overflow compaction to an inherited server adapter such as `ren-public-package` `0017`, with ordinary readable Pi compaction as the fallback.
+
+### Fixed
+- Gave each default child attempt its own offline `ModelRuntime`, preventing parallel stateful provider decorators/native-compaction adapters from overwriting sibling request snapshots.
+- Reject exhausted provider errors, aborted/truncated responses, and missing terminal text instead of returning stale/empty assistant output and journaling a false success.
+- Abort active compaction and branch summarization together with the agent loop so stall retries, kills, and shutdown do not wait for an adapter timeout.
+- Derive usage/tool telemetry from the full append-only session entry stream, including compacted-away messages, tool usage, and compaction/branch-summary requests; accumulate it across every stalled retry attempt.
+
+### Validated
+- Added live `WorkflowAgent` regression coverage for parallel runtime isolation, terminal provider errors, server-adapter overflow recovery, active-compaction abort, full-entry telemetry, and terminal threshold suppression, plus cumulative retry accounting and compaction-setting precedence tests.
+- Biome check, build, extension typecheck, and all 163 unit/integration tests pass against Pi 0.83.0.
+
 ## 1.8.3 - 2026-07-30
 
 ### Fixed

@@ -56,7 +56,7 @@ false success marker.
 In the production-like Pi 0.80.6 probe used for this package, the first request
 fell from 5,857 input tokens with eager loading to 3,912 with the bootstrap: a
 1,945-token reduction before a workflow is used. Pi 0.80.7 introduced, and
-0.80.8 preserves, anchoring of purely additive activation at the loader result
+0.83.0 preserves, anchoring of purely additive activation at the loader result
 for provider-cache-friendly deferral on supported Anthropic and OpenAI Responses
 models; other providers still receive the complete active list on the following
 model turn.
@@ -355,6 +355,10 @@ user prompt
 
 Subagents run in fresh Pi sessions with the standard coding tools, inherited global/project packages and extensions, and the parent session's project-trust decision. When the parent has persisted session storage, each child is also persisted as a linked Pi session.
 
+Child sessions preserve Pi's persisted automatic-compaction setting (Pi defaults it to enabled). Overflow recovery remains active while a child is working; a successful terminal one-shot response skips threshold compaction because no later prompt would consume the summary. If inherited resources include the `ren-public-package` server-compaction extension, supported Codex and Fluxion models use its native server adapter; otherwise Pi uses its ordinary readable compactor. Every child attempt owns a separate offline `ModelRuntime`, so parallel server-compaction adapters cannot overwrite one another's request state.
+
+Use the workflow tool's optional `autoCompaction` boolean or `WorkflowAgentOptions.autoCompaction` to override the persisted setting. SDK callers that inject `session.settingsManager` must also inject its paired, already-loaded `session.resourceLoader`; this prevents resource reload from erasing caller-owned in-memory overrides. Temporary CLI-only extensions are not inherited automatically.
+
 ## Library modules
 
 | File | Purpose |
@@ -395,10 +399,10 @@ This fork closes several Claude-Code-style gaps in the original prototype:
 - **CC-faithful timeouts.** `scriptTimeoutMs` (default 30s) bounds *only* the synchronous `vm` evaluation slice (matching Claude Code's internal sync-only `runInContext` timeout), so a `while (true) {}` cannot hang the host. There is no whole-run wall-clock deadline; instead activity-reset per-agent **stall detection** (180s, 5 retries — matching Claude Code) aborts and retries an individual stuck subagent and finally treats it as a normal failure (`null` + log), never killing the run.
 - **Runaway lifetime cap.** `maxAgents` (default 1000) caps total `agent()` spawns and throws a clear error when exceeded — the primary bound on `await agent()` runaways, alongside the abort signal and concurrency limiter.
 - **Background execution.** In TUI sessions a run executes in the background, returning a `runId` immediately and notifying on completion (Claude Code's `<task-notification>`); in print/JSON/RPC modes it runs in the foreground so results are never lost. The mode check is intentional because RPC has `ctx.hasUI === true` in pi 0.80.6. In-flight background runs are cancelled and awaited on session shutdown.
-- **Structured-output retry.** When a subagent has a schema but finishes without calling `structured_output`, it is re-prompted with a firm nudge up to N times (default 2) before failing.
-- **Real parent-environment inheritance.** Subagents inherit the parent Pi session's `model`, `thinkingLevel`, project-trust decision, and file-backed global/project package settings. Child resource loading preserves trusted project providers/workarounds while suppressing all project resources for untrusted parents; only workflow-tool extensions are filtered as a recursion guard. Temporary CLI `-e` extensions and inline factories cannot be reconstructed from settings, so SDK callers needing those can inject `WorkflowAgentOptions.session.resourceLoader`.
+- **Structured-output retry.** When a subagent has a schema but finishes without calling `structured_output`, it is re-prompted with a firm nudge up to N times (default 2) before failing. Exhausted Pi provider retries (`stopReason: "error"`), aborted/truncated turns, and empty terminal text are failures rather than journaled successes.
+- **Real parent-environment inheritance.** Subagents inherit the parent Pi session's `model`, `thinkingLevel`, project-trust decision, file-backed global/project package settings, and automatic-compaction preference. Child resource loading preserves trusted project providers/workarounds while suppressing all project resources for untrusted parents; only workflow-tool extensions are filtered as a recursion guard. Temporary CLI `-e` extensions and inline factories cannot be reconstructed from settings, so SDK callers needing those can inject a paired `WorkflowAgentOptions.session.settingsManager` + `resourceLoader`.
 - **Real per-agent option wiring.** Script-level `opts.model` resolves through the session's model registry; `opts.agentType` resolves named agent definitions from `~/.pi/agent/agents` / `.pi/agents`; `opts.isolation: 'worktree'` creates actual detached git worktrees (50-slot limiter, auto-cleanup of unchanged checkouts).
-- **Stall-based per-agent timeout with retries.** Activity-reset stall detection (180s default) with up to 5 retries per agent, replacing the earlier fixed per-agent wall clock.
+- **Stall-based per-agent timeout with retries.** Activity-reset stall detection (180s default) with up to 5 retries per agent, replacing the earlier fixed per-agent wall clock. Cancellation aborts both the agent loop and active compaction; token/cost telemetry accumulates across every retry and all append-only session entries, including compacted history and compaction requests.
 - **Script persistence + `scriptPath` iteration.** Every invocation persists its effective script to `.pi-workflow-runs/<runId>/workflow.js` and reports the path; re-invoke with `{scriptPath}` (+ `resumeFromRunId`) to iterate without resending the script.
 - **Saved workflows + `workflow()` nesting.** A named registry (built-in / user / project) invokable via the tool's `name` parameter, and a `workflow(nameOrRef, args)` sandbox primitive with one-level nesting that shares the parent's caps/budget/journal/abort.
 - **Built-in `deep-research` and `code-review` workflows** ported from Claude Code 2.1.172 (scope → fan-out → adversarial verify → synthesize, with the same vote constants and graceful salvage paths).

@@ -465,6 +465,19 @@ test("workflow tool requires exactly one of script/scriptPath/name", async () =>
   await assert.rejects(tool.execute("one-src", {} as never, undefined, undefined, fakeCtx), /exactly one of|workflow/);
 });
 
+test("workflow tool exposes and validates the child autoCompaction override", () => {
+  const tool = createWorkflowTool({ cwd: process.cwd(), journalDir: tmpDir("wf-compaction-option-") });
+  const prepared = tool.prepareArguments?.({
+    script: `${META}\nreturn await agent('x')`,
+    autoCompaction: false,
+  } as never) as { autoCompaction?: boolean } | undefined;
+  assert.equal(prepared?.autoCompaction, false);
+  assert.throws(
+    () => tool.prepareArguments?.({ script: `${META}\nreturn await agent('x')`, autoCompaction: "false" } as never),
+    /autoCompaction.*boolean/,
+  );
+});
+
 test("workflow tool persists inline scripts and supports {scriptPath} re-invocation with resume", async () => {
   const journalDir = tmpDir("wf-persist-");
   const cwd = tmpDir("wf-persist-cwd-");

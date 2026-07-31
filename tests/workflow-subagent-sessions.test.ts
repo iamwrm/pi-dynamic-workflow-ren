@@ -121,7 +121,7 @@ export default function (pi) {
   );
 }
 
-function createScopedSettingsFixture(): { cwd: string; agentDir: string } {
+function createScopedSettingsFixture(compactionEnabled?: boolean): { cwd: string; agentDir: string } {
   const cwd = tmpDir("wf-subagent-settings-cwd-");
   const agentDir = tmpDir("wf-subagent-settings-agent-");
   const projectConfigDir = path.join(cwd, ".pi");
@@ -149,7 +149,13 @@ function createScopedSettingsFixture(): { cwd: string; agentDir: string } {
   writeToolExtension(path.join(projectPackage, "workflow.ts"), "workflow");
   writeToolExtension(path.join(projectConfigDir, "extensions", "auto.ts"), "project_auto_tool");
 
-  fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ packages: ["./global-package"] }));
+  fs.writeFileSync(
+    path.join(agentDir, "settings.json"),
+    JSON.stringify({
+      packages: ["./global-package"],
+      ...(compactionEnabled !== undefined ? { compaction: { enabled: compactionEnabled } } : {}),
+    }),
+  );
   fs.writeFileSync(path.join(projectConfigDir, "settings.json"), JSON.stringify({ packages: ["../project-package"] }));
   return { cwd, agentDir };
 }
@@ -167,29 +173,25 @@ test("trusted subagents inherit global + project packages while filtering recurs
   const loader = createSubagentResourceLoader(cwd, agentDir, settingsManager);
 
   await loader.reload();
-  // WorkflowAgent applies this child-only override after reload; verify that the
-  // ordering leaves project settings loaded while compaction remains disabled.
-  settingsManager.applyOverrides({ compaction: { enabled: false } });
 
   assert.equal(settingsManager.isProjectTrusted(), true);
   assert.deepEqual(settingsManager.getGlobalSettings().packages, ["./global-package"]);
   assert.deepEqual(settingsManager.getProjectSettings().packages, ["../project-package"]);
-  assert.equal(settingsManager.getCompactionEnabled(), false);
+  assert.equal(settingsManager.getCompactionEnabled(), true);
   assert.deepEqual(loadedToolNames(loader), ["global_inherited_tool", "project_auto_tool", "project_inherited_tool"]);
 });
 
 test("untrusted subagents keep global packages but suppress project settings and extensions", async () => {
-  const { cwd, agentDir } = createScopedSettingsFixture();
+  const { cwd, agentDir } = createScopedSettingsFixture(false);
   const settingsManager = createSubagentSettingsManager(cwd, agentDir, false);
   const loader = createSubagentResourceLoader(cwd, agentDir, settingsManager);
 
   await loader.reload();
-  settingsManager.applyOverrides({ compaction: { enabled: false } });
 
   assert.equal(settingsManager.isProjectTrusted(), false);
   assert.deepEqual(settingsManager.getGlobalSettings().packages, ["./global-package"]);
   assert.deepEqual(settingsManager.getProjectSettings(), {});
-  assert.equal(settingsManager.getCompactionEnabled(), false);
+  assert.equal(settingsManager.getCompactionEnabled(), false, "persisted compaction opt-out survives resource reload");
   assert.deepEqual(loadedToolNames(loader), ["global_inherited_tool"]);
 });
 
