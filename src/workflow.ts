@@ -118,6 +118,11 @@ export interface WorkflowAgentSessionInfo {
   live: boolean;
   /** Live session reads while running; the capped final snapshot once finished. */
   getMessages?: () => readonly unknown[];
+  /**
+   * Cumulative telemetry through the current attempt. During a stall retry this
+   * includes completed attempts plus usage reported by the active session.
+   */
+  getTelemetry?: () => WorkflowAgentTelemetry;
   /** Newest persisted attempt (attempt 1 plain, stall retries suffixed .retryN). */
   messagesPath?: string;
   /**
@@ -750,9 +755,23 @@ export async function runWorkflow<T = unknown>(
           },
           onFeedEvent: feedState.onFeedEvent,
           onSessionHandle: (handle: WorkflowAgentSessionHandle) => {
+            // Freeze the completed-attempt baseline for THIS new session. The
+            // live reader then adds only the current attempt, so a stall retry
+            // neither resets the displayed count nor double-counts its predecessor.
+            const priorAttemptTelemetry = cumulativeTelemetry;
+            const readCurrentTelemetry = handle.getTelemetry;
+            const getTelemetry = readCurrentTelemetry
+              ? () => {
+                  const current = readCurrentTelemetry();
+                  return priorAttemptTelemetry ? mergeTelemetry(priorAttemptTelemetry, current) : current;
+                }
+              : priorAttemptTelemetry
+                ? () => priorAttemptTelemetry
+                : undefined;
             agentSessions.set(ordinal, {
               live: true,
               getMessages: handle.getMessages,
+              ...(getTelemetry ? { getTelemetry } : {}),
               ...(handle.sessionFile ? { sessionFile: handle.sessionFile } : {}),
               ...(handle.model ? { model: handle.model } : {}),
               ...(handle.thinkingLevel ? { thinkingLevel: handle.thinkingLevel } : {}),
@@ -768,6 +787,7 @@ export async function runWorkflow<T = unknown>(
             agentSessions.set(ordinal, {
               live: false,
               getMessages: () => capped,
+              ...(prior?.getTelemetry ? { getTelemetry: prior.getTelemetry } : {}),
               ...(persisted ? { messagesPath: persisted } : {}),
               // Take the pi child session path from THIS ATTEMPT's telemetry, not
               // the live handle or cumulative prior attempts: agent.run's finally

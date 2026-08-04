@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import type { WorkflowAgentTelemetry } from "../src/agent.js";
+import type { WorkflowSnapshot } from "../src/display.js";
 import { createWorkflowTool } from "../src/workflow-tool.js";
 
 const META = "export const meta = { name: 'live_ui', description: 'live ui tests' }\n";
@@ -15,6 +17,22 @@ function tmpJournalDir(): string {
 function fakeRunner() {
   return {
     run: async (prompt: string) => `echo:${prompt}`,
+  };
+}
+
+function telemetry(totalTokens: number): WorkflowAgentTelemetry {
+  return {
+    usage: {
+      input: totalTokens,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens,
+      cost: { input: totalTokens / 1000, output: 0, cacheRead: 0, cacheWrite: 0, total: totalTokens / 1000 },
+    },
+    tokens: totalTokens,
+    toolCalls: 1,
+    elapsedMs: 5,
   };
 }
 
@@ -126,6 +144,71 @@ test("background path drives a live progress widget, then fixes the final UI in 
   // messages can push the fixed workflow_result message up through session history.
   assert.equal(rec.widgetCalls.filter((call) => call.key === key).at(-1)?.content, undefined);
   assert.equal(rec.statusCalls.filter((call) => call.key === key).at(-1)?.text, undefined);
+});
+
+test("registered live snapshots poll changing subagent token usage before completion", async () => {
+  const rec = recordingUi();
+  let tokens = 1_200;
+  let markAgentStarted!: () => void;
+  const agentStarted = new Promise<void>((resolve) => {
+    markAgentStarted = resolve;
+  });
+  let releaseAgent!: () => void;
+  const agentReleased = new Promise<void>((resolve) => {
+    releaseAgent = resolve;
+  });
+  let resolveDelivery!: () => void;
+  const deliveryDone = new Promise<void>((resolve) => {
+    resolveDelivery = resolve;
+  });
+  let readSnapshot: (() => WorkflowSnapshot) | undefined;
+  const runner = {
+    run: async (
+      _prompt: string,
+      options?: {
+        onSessionHandle?: (handle: {
+          getMessages: () => readonly unknown[];
+          getTelemetry: () => WorkflowAgentTelemetry;
+        }) => void;
+        onTelemetry?: (value: WorkflowAgentTelemetry) => void;
+      },
+    ) => {
+      options?.onSessionHandle?.({ getMessages: () => [], getTelemetry: () => telemetry(tokens) });
+      markAgentStarted();
+      await agentReleased;
+      options?.onTelemetry?.(telemetry(tokens));
+      return "ok";
+    },
+  };
+  const tool = createWorkflowTool({
+    cwd: process.cwd(),
+    journalDir: tmpJournalDir(),
+    agent: runner,
+    registerLiveUi: (_runId, liveUi) => {
+      readSnapshot = liveUi.getSnapshot;
+    },
+    sendResult: () => resolveDelivery(),
+  });
+  const fakeCtx = { cwd: process.cwd(), hasUI: true, ui: rec.ui } as never;
+
+  try {
+    await tool.execute(
+      "bg-live-tokens",
+      { script: `${META}\nawait agent('measure', { label: 'metered' })\nreturn 1` },
+      undefined,
+      undefined,
+      fakeCtx,
+    );
+    await agentStarted;
+    assert.ok(readSnapshot, "background registration must expose getSnapshot");
+    assert.equal(readSnapshot().agents[0]?.tokens, 1_200);
+    tokens = 2_345;
+    assert.equal(readSnapshot().agents[0]?.tokens, 2_345, "each poll must read fresh session telemetry");
+    releaseAgent();
+    await deliveryDone;
+  } finally {
+    releaseAgent();
+  }
 });
 
 test("registered cleanup is idempotent after completion clears the widget", async () => {

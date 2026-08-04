@@ -80,6 +80,7 @@ function fixture(overrides: Partial<InspectorRun> = {}) {
   });
   return {
     inspector,
+    snapshot,
     frame: (width = 100) => inspector.render(width).join("\n"),
     killedAgentCalls,
     runKillCount: () => runKills,
@@ -99,6 +100,26 @@ test("inspector renders the run tree with phases, icons, and metrics", () => {
   // The run row is selected initially and its detail shows logs.
   assert.match(text, /▸ ▾ demo/);
   assert.match(text, /log two/);
+});
+
+test("running-agent and run totals refresh when live token usage changes", () => {
+  const { inspector, snapshot, frame } = fixture();
+  const running = snapshot.agents[2];
+  assert.ok(running);
+  running.tokens = 12_345;
+  let text = frame();
+  assert.match(text, /demo \(wf_demo\).*139\.1k tok/);
+  assert.match(text, /#3 ● rev b — running 1m05s · 12\.3k tok/);
+
+  inspector.handleInput(KEY_DOWN);
+  inspector.handleInput(KEY_DOWN);
+  inspector.handleInput(KEY_DOWN);
+  assert.match(frame(), /#3 rev b — running 1m05s · 12\.3k tok · Review/);
+
+  running.tokens = 23_456;
+  text = frame();
+  assert.match(text, /#3 ● rev b — running 1m05s · 23\.5k tok/);
+  assert.match(text, /demo \(wf_demo\).*150\.2k tok/);
 });
 
 test("navigation moves over runs and agents (skipping phase headers) and shows agent detail", () => {

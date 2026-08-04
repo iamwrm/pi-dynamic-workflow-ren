@@ -333,8 +333,15 @@ export class WorkflowInspector {
               ? "-"
               : "✗";
     const metrics =
-      agent.status === "running" && typeof agent.startedAtMs === "number"
-        ? `running ${formatDuration(this.now() - agent.startedAtMs)}`
+      agent.status === "running"
+        ? [
+            typeof agent.startedAtMs === "number"
+              ? `running ${formatDuration(this.now() - agent.startedAtMs)}`
+              : "running",
+            typeof agent.tokens === "number" ? `${formatTokens(agent.tokens)} tok` : undefined,
+          ]
+            .filter(Boolean)
+            .join(" · ")
         : [
             typeof agent.tokens === "number" ? `${formatTokens(agent.tokens)} tok` : undefined,
             typeof agent.toolCalls === "number" ? `${agent.toolCalls} tools` : undefined,
@@ -361,8 +368,15 @@ export class WorkflowInspector {
     const agent = selected.agent;
     const lines: string[] = [];
     const status =
-      agent.status === "running" && typeof agent.startedAtMs === "number"
-        ? `running ${formatDuration(this.now() - agent.startedAtMs)}`
+      agent.status === "running"
+        ? [
+            typeof agent.startedAtMs === "number"
+              ? `running ${formatDuration(this.now() - agent.startedAtMs)}`
+              : "running",
+            typeof agent.tokens === "number" ? `${formatTokens(agent.tokens)} tok` : undefined,
+          ]
+            .filter(Boolean)
+            .join(" · ")
         : agent.status;
     lines.push(` #${agent.id} ${agent.label} — ${status}${agent.phase ? ` · ${agent.phase}` : ""}`);
     lines.push(`  prompt: ${collapse(agent.prompt, Math.max(20, width - 12))}`);

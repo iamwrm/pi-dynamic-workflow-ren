@@ -238,7 +238,7 @@ export interface AgentRunOptions<TSchemaDef extends TSchema | undefined = undefi
    * text). Advisory like onActivity: exceptions are swallowed.
    */
   onFeedEvent?: (event: WorkflowAgentFeedEvent) => void;
-  /** Receives a live session handle right after the subagent session is created. */
+  /** Receives live message and telemetry access right after the subagent session is created. */
   onSessionHandle?: (handle: WorkflowAgentSessionHandle) => void;
   /** Receives the final message array just before the session is disposed. */
   onSessionEnd?: (messages: readonly unknown[]) => void;
@@ -271,6 +271,11 @@ export type WorkflowAgentFeedEvent =
 export interface WorkflowAgentSessionHandle {
   /** Current message array of the live session (pi AgentMessage shapes). */
   getMessages: () => readonly unknown[];
+  /**
+   * Current append-only usage/tool telemetry. Provider token usage becomes
+   * available after each completed model response; elapsed time remains live.
+   */
+  getTelemetry?: () => WorkflowAgentTelemetry;
   /**
    * Child session path this subagent WILL flush to on its first assistant
    * message (see WorkflowAgentSessionPersistence). May never materialize.
@@ -470,6 +475,7 @@ export class WorkflowAgent {
           thinkingLevel ?? (session as { thinkingLevel?: ThinkingLevel | undefined }).thinkingLevel;
         options.onSessionHandle?.({
           getMessages: () => session.messages as readonly unknown[],
+          getTelemetry: () => collectTelemetry(sessionManager.getEntries(), Date.now() - started),
           ...(effectiveModel ? { model: `${effectiveModel.provider}/${effectiveModel.id}` } : {}),
           ...(effectiveThinking ? { thinkingLevel: String(effectiveThinking) } : {}),
           ...(subagentSessionFile ? { sessionFile: subagentSessionFile } : {}),

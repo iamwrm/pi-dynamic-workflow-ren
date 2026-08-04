@@ -11,9 +11,10 @@ import {
   ModelRuntime,
   SessionManager,
   SettingsManager,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { WorkflowAgent, type WorkflowAgentTelemetry } from "../src/agent.js";
+import { WorkflowAgent, type WorkflowAgentSessionHandle, type WorkflowAgentTelemetry } from "../src/agent.js";
 
 let providerOrdinal = 0;
 
@@ -50,6 +51,7 @@ interface AgentHarnessOptions {
   contextWindow?: number;
   settings?: Parameters<typeof SettingsManager.inMemory>[0];
   extensions?: ExtensionFactory[];
+  tools?: ToolDefinition[];
   autoCompaction?: boolean;
   seed?: (sessionManager: SessionManager, model: Model<any>) => void;
 }
@@ -96,7 +98,7 @@ async function createAgentHarness(options: AgentHarnessOptions) {
 
   const agent = new WorkflowAgent({
     cwd,
-    tools: [],
+    tools: options.tools ?? [],
     model,
     ...(options.autoCompaction !== undefined ? { autoCompaction: options.autoCompaction } : {}),
     session: {
@@ -249,6 +251,60 @@ test("telemetry includes compacted-away messages and compaction request usage", 
     assert.equal(telemetry.usage.cost.total, 0.1 + 0.5 + currentAssistantUsage.cost.total);
     assert.ok(telemetry.usage.totalTokens > currentAssistantUsage.totalTokens);
   } finally {
+    harness.cleanup();
+  }
+});
+
+test("live session telemetry reports completed-turn usage before the subagent finishes", async () => {
+  const first = fauxAssistantMessage(fauxToolCall("hold", {}), { stopReason: "toolUse" });
+  let releaseTool!: () => void;
+  const toolReleased = new Promise<void>((resolve) => {
+    releaseTool = resolve;
+  });
+  let markToolStarted!: () => void;
+  const toolStarted = new Promise<void>((resolve) => {
+    markToolStarted = resolve;
+  });
+  const holdTool: ToolDefinition = {
+    name: "hold",
+    label: "Hold",
+    description: "Pause until the test releases the tool",
+    parameters: Type.Object({}),
+    async execute() {
+      markToolStarted();
+      await toolReleased;
+      return { content: [{ type: "text", text: "released" }], details: {} };
+    },
+  };
+  const harness = await createAgentHarness({
+    responses: [first, fauxAssistantMessage("finished")],
+    tools: [holdTool],
+    autoCompaction: false,
+  });
+  let handle: WorkflowAgentSessionHandle | undefined;
+  let running: Promise<string> | undefined;
+  try {
+    running = harness.agent.run("measure while the tool is active", {
+      onSessionHandle: (event) => {
+        handle = event;
+      },
+    });
+    await toolStarted;
+    const live = handle?.getTelemetry?.();
+    const completedTurnUsage = harness.sessionManager
+      .getEntries()
+      .filter((entry) => entry.type === "message" && entry.message.role === "assistant")
+      .at(-1)?.message.usage;
+    assert.ok(completedTurnUsage);
+    assert.ok(completedTurnUsage.totalTokens > 0);
+    assert.equal(live?.tokens, completedTurnUsage.totalTokens);
+    assert.equal(live?.usage?.cost.total, completedTurnUsage.cost.total);
+    assert.equal(live?.toolCalls, 0, "the still-running tool has no result entry yet");
+    releaseTool();
+    assert.equal(await running, "finished");
+  } finally {
+    releaseTool();
+    await running?.catch(() => {});
     harness.cleanup();
   }
 });

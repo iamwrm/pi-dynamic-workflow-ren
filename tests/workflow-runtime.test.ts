@@ -3,8 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import type { WorkflowAgentTelemetry } from "../src/agent.js";
 import { agentKey, WorkflowJournal } from "../src/journal.js";
-import { runWorkflow } from "../src/workflow.js";
+import { runWorkflow, type WorkflowRunControls } from "../src/workflow.js";
 import { createWorkflowTool } from "../src/workflow-tool.js";
 
 const META = "export const meta = { name: 'rt', description: 'runtime tests' }\n";
@@ -240,6 +241,84 @@ test("stall retries accumulate usage from every attempt", async () => {
   assert.equal(result.spentTokens, 110);
   assert.equal(result.tokenUsage?.totalTokens, 110);
   assert.equal(result.tokenUsage?.cost.total, 0.11);
+});
+
+test("live telemetry remains cumulative when a stalled attempt is retried", async () => {
+  const metered = (totalTokens: number): WorkflowAgentTelemetry => ({
+    usage: {
+      input: totalTokens,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens,
+      cost: { input: totalTokens / 1000, output: 0, cacheRead: 0, cacheWrite: 0, total: totalTokens / 1000 },
+    },
+    tokens: totalTokens,
+    toolCalls: 1,
+    elapsedMs: 5,
+  });
+  let attempts = 0;
+  let controls: WorkflowRunControls | undefined;
+  let markSecondStarted!: () => void;
+  const secondStarted = new Promise<void>((resolve) => {
+    markSecondStarted = resolve;
+  });
+  let releaseSecond!: () => void;
+  const secondReleased = new Promise<void>((resolve) => {
+    releaseSecond = resolve;
+  });
+  const runner = {
+    run: async (
+      _prompt: string,
+      options?: {
+        signal?: AbortSignal;
+        onTelemetry?: (telemetry: WorkflowAgentTelemetry) => void;
+        onSessionHandle?: (handle: {
+          getMessages: () => readonly unknown[];
+          getTelemetry: () => WorkflowAgentTelemetry;
+        }) => void;
+      },
+    ) => {
+      attempts++;
+      const current = metered(attempts === 1 ? 100 : 10);
+      options?.onSessionHandle?.({ getMessages: () => [], getTelemetry: () => current });
+      if (attempts === 1) {
+        await new Promise<void>((resolve) => {
+          if (options?.signal?.aborted) resolve();
+          else options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        options?.onTelemetry?.(current);
+        throw new Error("stalled");
+      }
+      markSecondStarted();
+      await secondReleased;
+      options?.onTelemetry?.(current);
+      return "recovered";
+    },
+  };
+
+  const running = runWorkflow<number>(`${META}\nawait agent('metered retry')\nreturn budget.spent()`, {
+    agent: runner,
+    journalDir: tmpJournalDir(),
+    stallTimeoutMs: 30,
+    stallRetries: 1,
+    onRunControls: (value) => {
+      controls = value;
+    },
+  });
+  try {
+    await secondStarted;
+    const live = controls?.getAgentSession(1)?.getTelemetry?.();
+    assert.equal(live?.tokens, 110, "completed retry usage and the active attempt must be combined once");
+    assert.equal(live?.usage?.cost.total, 0.11);
+    releaseSecond();
+    const result = await running;
+    assert.equal(result.result, 110);
+    assert.equal(result.spentTokens, 110);
+  } finally {
+    releaseSecond();
+    await running.catch(() => {});
+  }
 });
 
 test("resume/journaling replays persisted token telemetry without re-spawning", async () => {

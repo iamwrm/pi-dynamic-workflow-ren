@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.8.5 - 2026-08-04
+
+### Added
+- The `/workflows` inspector now shows provider-reported token usage for running subagents beside the live elapsed clock, and refreshes per-agent and run totals as new model responses finish.
+- Live session telemetry uses the same append-only accounting as final results, including nested tool/compaction usage, and remains cumulative across stalled-attempt retries without resetting or double-counting.
+
+### Validated
+- Added regression coverage for in-flight session usage, retry accumulation, polled live snapshots, and updating inspector tree/detail totals.
+- A tmux TUI smoke test showed `6.3k tok` on a still-running agent while its elapsed clock advanced from 18s to 28s.
+- Biome check, build, extension typecheck, and all 167 unit/integration tests pass against Pi 0.83.0.
+
 ## 1.8.4 - 2026-07-31
 
 ### Changed

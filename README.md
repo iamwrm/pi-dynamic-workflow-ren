@@ -163,10 +163,10 @@ selection.
  Workflows — live runs
  ▸ ▾ repo_review (wf_ab12) · Parallel reviews — 2/5 done · 2 running · 412.3k tok · 3m04s
      ── Parallel reviews
-     #2 ● packages review — running 4m12s
+     #2 ● packages review — running 4m12s · 285.6k tok
      #3 ✓ root and docs — 126.7k tok · 12 tools · 2m21s
  ─────────────────────────────────────────────────────
- #2 packages review — running 4m12s · Parallel reviews
+ #2 packages review — running 4m12s · 285.6k tok · Parallel reviews
   prompt: You are reviewing the git repository at …
   ⚒ read src/workflow-tool.ts
   ⚒ grep redact
@@ -175,9 +175,11 @@ selection.
 ```
 
 - `↑/↓` move over runs and agents, `⏎`/`←`/`→` fold/unfold a run
-- the detail pane shows the selected agent's prompt, live `running` clock, its
-  recent **activity feed** (tool calls, errors, message summaries) and the
-  streaming text tail (`▌…`) — refreshed ~2.5×/second while open
+- the tree and detail pane show the selected agent's live `running` clock and
+  accumulated provider-reported token usage, plus its prompt, recent **activity
+  feed** (tool calls, errors, message summaries), and streaming text tail
+  (`▌…`) — refreshed ~2.5×/second while open; token totals advance after each
+  completed model response
 - `k` kills the selected running agent, `K` kills the whole run — both with an
   inline `y/n` confirm, riding the same kill semantics as `workflow_tasks`
 - `y` prints a copy-able resume snippet for the selected run
@@ -193,7 +195,7 @@ so markdown, thinking blocks, and tool boxes render exactly like the main chat:
 
 - the full composed user message ("what is sent": task label, prompt, output
   contract), assistant turns with live streaming, pi-style tool call/result boxes
-- header shows status + live clock, **model id**, **thinking level**, tokens
+- header shows status + live clock, **model id**, **thinking level**, and the same live token total
 - `↑↓`/`PgUp`/`PgDn`/`g`/`G` scroll with bottom-follow while streaming;
   `t` toggles thinking blocks; `e` expands/collapses tool results;
   `k` kills (confirm) without leaving the view; `←`/`esc` back to the tree

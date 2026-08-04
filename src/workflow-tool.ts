@@ -112,6 +112,35 @@ function createLiveBackgroundUi(ui: ExtensionContext["ui"] | undefined, runId: s
   };
 }
 
+/**
+ * Add exact provider-reported usage from active subagent sessions to a live
+ * snapshot. `/workflows` polls getSnapshot() every 400ms, so this pull model
+ * needs no extra timer or per-stream-event telemetry churn. Finalized snapshot
+ * fields still win once onAgentEnd records the authoritative total.
+ */
+function withLiveAgentTokens(snapshot: WorkflowSnapshot, controls: WorkflowRunControls | undefined): WorkflowSnapshot {
+  if (!controls) return snapshot;
+  let changed = false;
+  const agents = snapshot.agents.map((agent) => {
+    if (agent.status !== "running") return agent;
+    try {
+      const telemetry = controls.getAgentSession(agent.id)?.getTelemetry?.();
+      const tokens = telemetry?.tokens ?? telemetry?.usage?.totalTokens;
+      if (typeof tokens !== "number") return agent;
+      changed = true;
+      return {
+        ...agent,
+        tokens,
+        ...(telemetry?.estimatedTokens ? { estimatedTokens: true } : {}),
+      };
+    } catch {
+      // Live telemetry is advisory; a stale/disposed session must not break UI.
+      return agent;
+    }
+  });
+  return changed ? { ...snapshot, agents } : snapshot;
+}
+
 const workflowToolSchema = Type.Object({
   script: Type.Optional(
     Type.String({
@@ -659,7 +688,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
           key: widgetToClear.key,
           clear: () => widgetToClear.clear(),
           name: parsed.meta.name,
-          getSnapshot: () => snapshot,
+          getSnapshot: () => withLiveAgentTokens(snapshot, runControls),
           startedAtMs: Date.now(),
           killRun: () => perRunController.abort(),
           killAgents: (ids) =>
