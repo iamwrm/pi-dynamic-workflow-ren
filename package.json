@@ -1,6 +1,6 @@
 {
   "name": "pi-dynamic-workflow-rencc",
-  "version": "1.8.6",
+  "version": "1.8.7",
   "description": "Claude-Code-style dynamic workflow orchestration for Pi, with resumable journaled runs, a runtime determinism shim, a hardened vm sandbox, and parent-session model/extension inheritance.",
   "type": "module",
   "private": true,

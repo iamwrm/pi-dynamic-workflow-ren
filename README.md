@@ -163,10 +163,10 @@ selection.
  Workflows — live runs
  ▸ ▾ repo_review (wf_ab12) · Parallel reviews — 2/5 done · 2 running · 412.3k tok · 3m04s
      ── Parallel reviews
-     #2 ● packages review — running 4m12s · 285.6k tok
-     #3 ✓ root and docs — 126.7k tok · 12 tools · 2m21s
+     #2 ● packages review — running 4m12s · 285.6k tok · anthropic/claude-opus · high
+     #3 ✓ root and docs — 126.7k tok · 12 tools · 2m21s · anthropic/claude-sonnet · medium
  ─────────────────────────────────────────────────────
- #2 packages review — running 4m12s · 285.6k tok · Parallel reviews
+ #2 packages review — running 4m12s · 285.6k tok · Parallel reviews · anthropic/claude-opus · high
   prompt: You are reviewing the git repository at …
   ⚒ read src/workflow-tool.ts
   ⚒ grep redact
@@ -175,11 +175,12 @@ selection.
 ```
 
 - `↑/↓` move over runs and agents, `⏎`/`←`/`→` fold/unfold a run
-- the tree and detail pane show the selected agent's live `running` clock and
-  accumulated provider-reported token usage, plus its prompt, recent **activity
-  feed** (tool calls, errors, message summaries), and streaming text tail
-  (`▌…`) — refreshed ~2.5×/second while open; token totals advance after each
-  completed model response
+- the tree and detail pane show each agent's resolved **model** and **thinking
+  level**, plus the selected agent's live `running` clock and accumulated
+  provider-reported token usage, prompt, recent **activity feed** (tool calls,
+  errors, message summaries), and streaming text tail (`▌…`) — refreshed
+  ~2.5×/second while open; token totals advance after each completed model
+  response
 - `k` kills the selected running agent, `K` kills the whole run — both with an
   inline `y/n` confirm, riding the same kill semantics as `workflow_tasks`
 - `y` prints a copy-able resume snippet for the selected run

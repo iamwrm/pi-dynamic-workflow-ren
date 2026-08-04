@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.8.7 - 2026-08-04
+
+### Added
+- The `/workflows` inspector now shows each subagent's resolved model and thinking level in the live tree and selected-agent detail pane, alongside elapsed time and token usage.
+
+### Validated
+- Biome check, build, extension typecheck, and unit/integration tests pass against Pi 0.83.0.
+
 ## 1.8.6 - 2026-08-04
 
 ### Fixed

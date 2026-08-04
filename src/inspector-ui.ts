@@ -291,7 +291,7 @@ export class WorkflowInspector {
       const marker = row.key === selected?.key ? "▸" : " ";
       if (row.kind === "run") push(`${marker} ${this.runLine(row)}`);
       else if (row.kind === "phase") push(`   ── ${row.title}`);
-      else push(`${marker}   ${this.agentLine(row.agent)}`);
+      else push(`${marker}   ${this.agentLine(row.run, row.agent)}`);
     }
     const hidden = rows.length - (start + visible.length);
     if (hidden > 0) push(`   … ${hidden} more below …`);
@@ -321,7 +321,19 @@ export class WorkflowInspector {
     return `${fold} ${run.name} (${run.runId})${phase} — ${counts}${spent ? ` · ${formatTokens(spent)} tok` : ""}${elapsed}`;
   }
 
-  private agentLine(agent: WorkflowAgentSnapshot): string {
+  private agentSessionMetrics(run: InspectorRun, agentId: number): string[] {
+    try {
+      const session = run.getAgentSession?.(agentId);
+      return [session?.model, session?.thinkingLevel].filter(
+        (value): value is string => typeof value === "string" && value.length > 0,
+      );
+    } catch {
+      // A session may disappear while a background run settles; metadata is advisory.
+      return [];
+    }
+  }
+
+  private agentLine(run: InspectorRun, agent: WorkflowAgentSnapshot): string {
     const icon =
       agent.status === "running"
         ? "●"
@@ -332,6 +344,7 @@ export class WorkflowInspector {
             : agent.status === "skipped"
               ? "-"
               : "✗";
+    const sessionMetrics = this.agentSessionMetrics(run, agent.id);
     const metrics =
       agent.status === "running"
         ? [
@@ -339,6 +352,7 @@ export class WorkflowInspector {
               ? `running ${formatDuration(this.now() - agent.startedAtMs)}`
               : "running",
             typeof agent.tokens === "number" ? `${formatTokens(agent.tokens)} tok` : undefined,
+            ...sessionMetrics,
           ]
             .filter(Boolean)
             .join(" · ")
@@ -346,6 +360,7 @@ export class WorkflowInspector {
             typeof agent.tokens === "number" ? `${formatTokens(agent.tokens)} tok` : undefined,
             typeof agent.toolCalls === "number" ? `${agent.toolCalls} tools` : undefined,
             typeof agent.elapsedMs === "number" ? formatDuration(agent.elapsedMs) : undefined,
+            ...sessionMetrics,
           ]
             .filter(Boolean)
             .join(" · ") || agent.status;
@@ -367,6 +382,7 @@ export class WorkflowInspector {
     if (selected.kind === "phase") return [];
     const agent = selected.agent;
     const lines: string[] = [];
+    const sessionMetrics = this.agentSessionMetrics(selected.run, agent.id);
     const status =
       agent.status === "running"
         ? [
@@ -378,7 +394,9 @@ export class WorkflowInspector {
             .filter(Boolean)
             .join(" · ")
         : agent.status;
-    lines.push(` #${agent.id} ${agent.label} — ${status}${agent.phase ? ` · ${agent.phase}` : ""}`);
+    lines.push(
+      ` #${agent.id} ${agent.label} — ${status}${agent.phase ? ` · ${agent.phase}` : ""}${sessionMetrics.length ? ` · ${sessionMetrics.join(" · ")}` : ""}`,
+    );
     lines.push(`  prompt: ${collapse(agent.prompt, Math.max(20, width - 12))}`);
     const feed = selected.run.getAgentFeed?.(agent.id);
     if (feed) {

@@ -68,6 +68,12 @@ function fixture(overrides: Partial<InspectorRun> = {}) {
             transcriptPath: "/tmp/agents/003-rev-b.md",
           }
         : undefined,
+    getAgentSession: (id) =>
+      id === 1
+        ? { live: false, model: "anthropic/claude-done", thinkingLevel: "medium" }
+        : id === 3
+          ? { live: true, model: "openai/gpt-running", thinkingLevel: "high" }
+          : undefined,
     ...overrides,
   };
   let closed = 0;
@@ -94,9 +100,9 @@ test("inspector renders the run tree with phases, icons, and metrics", () => {
   assert.match(text, /▾ demo \(wf_demo\) · Review — 1\/3 done · 1 running · 1 failed · 126\.7k tok · 2m00s/);
   assert.match(text, /── Scan/);
   assert.match(text, /── Review/);
-  assert.match(text, /#1 ✓ scanner — 126\.7k tok · 3 tools · 1m30s/);
+  assert.match(text, /#1 ✓ scanner — 126\.7k tok · 3 tools · 1m30s · anthropic\/claude-done · medium/);
   assert.match(text, /#2 ✗ rev a \(killed\)/);
-  assert.match(text, /#3 ● rev b — running 1m05s/);
+  assert.match(text, /#3 ● rev b — running 1m05s · openai\/gpt-running · high/);
   // The run row is selected initially and its detail shows logs.
   assert.match(text, /▸ ▾ demo/);
   assert.match(text, /log two/);
@@ -109,16 +115,16 @@ test("running-agent and run totals refresh when live token usage changes", () =>
   running.tokens = 12_345;
   let text = frame();
   assert.match(text, /demo \(wf_demo\).*139\.1k tok/);
-  assert.match(text, /#3 ● rev b — running 1m05s · 12\.3k tok/);
+  assert.match(text, /#3 ● rev b — running 1m05s · 12\.3k tok · openai\/gpt-running · high/);
 
   inspector.handleInput(KEY_DOWN);
   inspector.handleInput(KEY_DOWN);
   inspector.handleInput(KEY_DOWN);
-  assert.match(frame(), /#3 rev b — running 1m05s · 12\.3k tok · Review/);
+  assert.match(frame(), /#3 rev b — running 1m05s · 12\.3k tok · Review · openai\/gpt-running · high/);
 
   running.tokens = 23_456;
   text = frame();
-  assert.match(text, /#3 ● rev b — running 1m05s · 23\.5k tok/);
+  assert.match(text, /#3 ● rev b — running 1m05s · 23\.5k tok · openai\/gpt-running · high/);
   assert.match(text, /demo \(wf_demo\).*150\.2k tok/);
 });
 
