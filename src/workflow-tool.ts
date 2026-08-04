@@ -223,8 +223,9 @@ export interface WorkflowToolOptions {
   /**
    * Compose a shutdown-cancellation signal into each background run so quit /
    * reload / new aborts in-flight subagents. The extension owns an AbortController
-   * fired from a session_shutdown handler and returns its signal here. Optional:
-   * when absent, only the tool's own signal bounds the run.
+   * fired from a session_shutdown handler and returns its signal here. Once the
+   * background handoff is accepted, this signal and the run's explicit kill
+   * controller own its lifetime; the originating tool signal no longer does.
    */
   getShutdownSignal?: () => AbortSignal | undefined;
   /**
@@ -330,6 +331,7 @@ export function buildWorkflowPromptGuidelines(options: WorkflowGuideOptions = {}
     "For workflow, opts.isolation: 'worktree' runs the agent in a REAL disposable git worktree (detached checkout of the repo). Use it ONLY when agents mutate files in parallel and would conflict - it costs setup time and disk. Unchanged worktrees are auto-removed; changed ones are kept and their paths logged.",
     "For workflow, to resume a previous workflow run, pass its runId as resumeFromRunId; resume invalidation is per-call content-addressed (ordinal + prompt + label + schema + per-agent options), not Claude-Code prefix-based, so thread upstream results into downstream prompts so changing an earlier step forces dependent steps to re-run on resume.",
     "For workflow, in an interactive session the run executes in the BACKGROUND: the tool returns immediately with a runId and status 'running', then delivers the completed result as a follow-up message once it finishes - do not block waiting for it. In non-interactive (-p/print/RPC) mode the tool runs in the foreground and returns the full result synchronously.",
+    "For workflow, an accepted background run has an independent cancellation lifetime: aborting a later parent turn does not stop it. Use workflow_tasks {action: 'kill', runId} (or agentIds for selected subagents) when the user asks to stop workflow work.",
   ];
 }
 
@@ -596,18 +598,24 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       const canBackground = interactiveTui && typeof options.sendResult === "function";
 
       if (canBackground) {
-        // Compose the tool's own signal with the extension-owned shutdown signal so
-        // quit / reload / new aborts in-flight subagents (Node 24 AbortSignal.any).
+        // A background run becomes an independently owned task when this execute()
+        // call returns status "running". Relay the originating tool signal only while
+        // the launch is being registered; keeping it composed after return would let
+        // an unrelated later parent-turn abort (including a compaction checkpoint)
+        // kill already-detached work.
         const shutdownSignal = options.getShutdownSignal?.();
         // Per-run kill controller: lets workflow_tasks / /kill-workflow abort exactly
         // this run while other background runs (and the session) keep going.
         const perRunController = new AbortController();
+        const detachOriginSignal = relayAbortUntilDetached(signal, perRunController);
         const signals = [perRunController.signal];
-        if (signal) signals.push(signal);
         if (shutdownSignal) signals.push(shutdownSignal);
         const runSignal = AbortSignal.any(signals);
 
         const sendResult = options.sendResult as (r: WorkflowBackgroundResult) => void;
+        // If extension-owned handoff registration itself throws, abort the unowned
+        // run and suppress its asynchronous result instead of leaving an orphan.
+        let handedOff = false;
 
         // Live progress UI for the detached run. Keyed per runId so concurrent
         // background runs each own their own widget/status. The run's snapshot
@@ -628,6 +636,10 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
         // session_shutdown is an independent backstop.
         const settled = runWorkflowToResult(runSignal, runId, params.resumeFromRunId).then(
           (finished) => {
+            if (!handedOff) {
+              liveWidget?.clear();
+              return;
+            }
             const status: WorkflowBackgroundResult["status"] = "completed";
             // No completion toast: sendResult below posts the outcome as a
             // workflow_result message (the user-facing surface). That fixed transcript
@@ -648,6 +660,10 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
             liveWidget?.clear();
           },
           (error: unknown) => {
+            if (!handedOff) {
+              liveWidget?.clear();
+              return;
+            }
             const aborted = runSignal?.aborted || isAbortError(error);
             const status: WorkflowBackgroundResult["status"] = aborted ? "aborted" : "failed";
             const message = error instanceof Error ? error.message : String(error);
@@ -677,39 +693,50 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
             }
           },
         );
-        // Track the settled promise so session_shutdown can await it (after firing
-        // the shutdown signal) and let cancellation flush before dispose.
-        options.trackRun?.(runId, settled);
-        // Register this run's clear() so the extension can defensively clear the
-        // widget/status on shutdown (clear() is idempotent), plus name/getSnapshot
-        // so /workflows can list live runs with their current progress.
-        const widgetToClear = liveWidget;
-        options.registerLiveUi?.(runId, {
-          key: widgetToClear.key,
-          clear: () => widgetToClear.clear(),
-          name: parsed.meta.name,
-          getSnapshot: () => withLiveAgentTokens(snapshot, runControls),
-          startedAtMs: Date.now(),
-          killRun: () => perRunController.abort(),
-          killAgents: (ids) =>
-            runControls
-              ? runControls.killAgents(ids)
-              : ids.map((id) => ({ id, killed: false, reason: "run not started" })),
-          getAgentFeed: (id) => runControls?.getAgentFeed(id),
-          getAgentSession: (id) => runControls?.getAgentSession(id),
-        });
+        try {
+          // Track the settled promise so session_shutdown can await it (after firing
+          // the shutdown signal) and let cancellation flush before dispose.
+          options.trackRun?.(runId, settled);
+          // Register this run's clear() so the extension can defensively clear the
+          // widget/status on shutdown (clear() is idempotent), plus name/getSnapshot
+          // so /workflows can list live runs with their current progress.
+          const widgetToClear = liveWidget;
+          options.registerLiveUi?.(runId, {
+            key: widgetToClear.key,
+            clear: () => widgetToClear.clear(),
+            name: parsed.meta.name,
+            getSnapshot: () => withLiveAgentTokens(snapshot, runControls),
+            startedAtMs: Date.now(),
+            killRun: () => perRunController.abort(),
+            killAgents: (ids) =>
+              runControls
+                ? runControls.killAgents(ids)
+                : ids.map((id) => ({ id, killed: false, reason: "run not started" })),
+            getAgentFeed: (id) => runControls?.getAgentFeed(id),
+            getAgentSession: (id) => runControls?.getAgentSession(id),
+          });
+          handedOff = true;
+        } catch (error) {
+          perRunController.abort(error);
+          liveWidget.clear();
+          throw error;
+        } finally {
+          // This is the ownership boundary: after successful registration, only
+          // workflow-specific kill and session shutdown can cancel the detached run.
+          detachOriginSignal();
+        }
 
         // The immediate result is being returned now; stop streaming to the per-call
         // onUpdate sink so the detached run's later callbacks do not push updates to
-        // a resolved tool call. (The detached run is still bounded by runSignal and
-        // delivers its outcome via sendResult.)
+        // a resolved tool call. The detached run remains bounded by its per-run and
+        // session-shutdown signals and delivers its outcome via sendResult.
         liveStreaming = false;
 
         return {
           content: [
             {
               type: "text",
-              text: `Workflow ${parsed.meta.name} started in background (runId ${runId}). You'll be notified on completion.${scriptFilePath ? ` Script file: ${scriptFilePath}` : ""}`,
+              text: `Workflow ${parsed.meta.name} started in background (runId ${runId}). You'll be notified on completion. To abort it, use workflow_tasks { action: "kill", runId: "${runId}" }; the user can run /kill-workflow ${runId}.${scriptFilePath ? ` Script file: ${scriptFilePath}` : ""}`,
             },
           ],
           details: {
@@ -853,6 +880,23 @@ function normalizeWorkflowScript(script: string): string {
 function isAbortError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return /\babort(?:ed)?\b/i.test(error.message);
+}
+
+/**
+ * Relay a parent tool abort only until a background run crosses its explicit
+ * ownership handoff. AbortSignal.any() cannot remove one source later, so use a
+ * removable listener to keep launch cancellation without coupling the detached
+ * run to every future abort of the originating parent turn.
+ */
+function relayAbortUntilDetached(source: AbortSignal | undefined, target: AbortController): () => void {
+  if (!source) return () => {};
+  const relay = () => target.abort(source.reason);
+  if (source.aborted) {
+    relay();
+    return () => {};
+  }
+  source.addEventListener("abort", relay, { once: true });
+  return () => source.removeEventListener("abort", relay);
 }
 
 /** getAgentDir() touches the environment; never let it break tool execution. */

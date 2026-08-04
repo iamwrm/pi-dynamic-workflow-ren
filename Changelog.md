@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.8.6 - 2026-08-04
+
+### Fixed
+- Accepted TUI background runs now detach from the originating tool signal after their run registry and cancellation controls are installed. A later main-agent abort, including a forced mid-turn compaction boundary, can no longer terminate already-detached workflow work.
+- Failed handoff registration aborts the unowned run and suppresses its asynchronous result instead of leaving an orphaned background task.
+
+### Changed
+- Background workflow cancellation is now explicit after handoff: users retain `/kill-workflow` and the `/workflows` kill controls, models retain whole-run and per-agent `workflow_tasks` kills, and session shutdown still aborts and drains every run. Foreground workflows and launches before handoff continue to honor the originating tool signal.
+- Start results and documentation now state the independent background lifetime and its workflow-specific cancellation commands.
+
+### Validated
+- Added regression coverage showing that an accepted hanging run survives its parent-turn abort and remains immediately killable through the existing per-run controller, while a failed handoff is aborted without detached delivery.
+- Biome check, build, extension typecheck, and all 169 unit/integration tests pass against Pi 0.83.0.
+
 ## 1.8.5 - 2026-08-04
 
 ### Added

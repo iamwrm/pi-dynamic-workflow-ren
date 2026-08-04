@@ -558,6 +558,85 @@ test("background run: registerLiveUi exposes kill controls; killRun aborts only 
   assert.deepEqual(delivered, [{ status: "aborted" }]);
 });
 
+test("failed background handoff aborts the unowned run without delivering a detached result", async () => {
+  let deliveries = 0;
+  const tool = createWorkflowTool({
+    cwd: process.cwd(),
+    journalDir: tmpJournalDir(),
+    agent: hangAwareRunner(),
+    sendResult: () => {
+      deliveries++;
+    },
+    registerLiveUi: () => {
+      throw new Error("registry unavailable");
+    },
+  });
+
+  await assert.rejects(
+    tool.execute(
+      "bg-handoff-failure",
+      { script: `${META}\nawait agent('hang forever')\nreturn 1` } as never,
+      new AbortController().signal,
+      undefined,
+      { cwd: process.cwd(), hasUI: true } as never,
+    ),
+    /registry unavailable/,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(deliveries, 0);
+});
+
+test("accepted background run survives its parent-turn abort and remains explicitly killable", async () => {
+  const delivered: Array<{ status: string }> = [];
+  let resolveDelivery!: () => void;
+  const deliveryDone = new Promise<void>((resolve) => {
+    resolveDelivery = resolve;
+  });
+  let liveUi:
+    | {
+        getSnapshot?: () => WorkflowSnapshot;
+        killRun?: () => void;
+      }
+    | undefined;
+  const origin = new AbortController();
+  const tool = createWorkflowTool({
+    cwd: process.cwd(),
+    journalDir: tmpJournalDir(),
+    agent: hangAwareRunner(),
+    sendResult: (result) => {
+      delivered.push({ status: result.status });
+      resolveDelivery();
+    },
+    registerLiveUi: (_runId, ui) => {
+      liveUi = ui;
+    },
+  });
+
+  const immediate = await tool.execute(
+    "bg-parent-abort",
+    { script: `${META}\nawait agent('hang forever')\nreturn 1` } as never,
+    origin.signal,
+    undefined,
+    { cwd: process.cwd(), hasUI: true } as never,
+  );
+  assert.equal((immediate.details as { status?: string }).status, "running");
+  await waitFor(() => liveUi?.getSnapshot?.().agents[0]?.status === "running");
+
+  // Models and extensions may abort the originating main-agent turn later (for
+  // example, to establish a mid-turn compaction boundary). The accepted run owns
+  // an independent cancellation scope, so that parent abort must not stop it.
+  origin.abort(new Error("parent turn checkpoint"));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(delivered, []);
+  assert.equal(liveUi?.getSnapshot?.().agents[0]?.status, "running");
+
+  // Workflow-specific cancellation remains authoritative for both the user-facing
+  // /kill-workflow command and the model-facing workflow_tasks kill action.
+  liveUi?.killRun?.();
+  await deliveryDone;
+  assert.deepEqual(delivered, [{ status: "aborted" }]);
+});
+
 test("background run: killAgents kills one agent and the run still completes", async () => {
   const delivered: Array<{ status: string }> = [];
   let resolveDelivery!: () => void;

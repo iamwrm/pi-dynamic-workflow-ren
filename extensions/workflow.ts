@@ -40,9 +40,10 @@ type WorkflowResultDetails = Partial<WorkflowSnapshot> & {
 };
 
 export default function extension(pi: ExtensionAPI) {
-  // Extension-owned shutdown controller. Backgrounded workflow runs compose this
-  // signal so quit / reload / new aborts their in-flight subagents (the handler
-  // below is awaited before session.dispose(), so cancellation lands cleanly).
+  // Extension-owned shutdown controller. Accepted background runs are independent
+  // of their originating parent-turn signal and compose this lifecycle signal so
+  // quit / reload / new aborts their in-flight subagents (the handler below is
+  // awaited before session.dispose(), so cancellation lands cleanly).
   let shutdownController = new AbortController();
   // Detached background runs in flight, keyed by runId. session_shutdown awaits
   // these (after firing the shutdown signal) so cancellation flushes before dispose.
