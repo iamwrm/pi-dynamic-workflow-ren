@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { defineTool, getAgentDir, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { defineTool, getAgentDir, keyText, type Theme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { WorkflowAgent, WorkflowAgentSessionPersistence } from "./agent.js";
@@ -753,7 +753,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       // whenever no interactive background delivery is wired.
       return runWorkflowToResult(signal, runId, params.resumeFromRunId);
     },
-    renderCall(args, theme) {
+    renderCall(args, theme, context?: { expanded?: boolean }) {
       // Show the generated workflow JS so the user can review it while the run
       // proceeds. This renders BEFORE renderResult and the live progress widget,
       // and persists in the transcript. Must be total: never throw.
@@ -764,14 +764,22 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       // title instead of rendering a "generated script" header with an empty body.
       const normalized = typeof script === "string" ? normalizeWorkflowScript(script) : "";
       if (normalized.length > 0) {
+        const header = theme.fg("toolTitle", theme.bold(workflowScriptHeader(normalized)));
+        // Tool-output collapse (pi convention: native read/bash/write gate long
+        // call payloads on ToolRenderContext.expanded, toggled by Ctrl+O). The
+        // collapsed box shows a short preview; the full script renders only when
+        // tool output is expanded, so a long generated script cannot balloon the
+        // transcript.
+        if (!context?.expanded) {
+          return new Text(`${header}\n${collapsedScriptBlock(normalized, theme)}`, 0, 0);
+        }
         const block = formatWorkflowScriptForDisplay(normalized);
         const headerEnd = block.indexOf("\n");
         if (headerEnd === -1) {
           // Defensive: a header-only block (no body lines). Not reachable from a
           // non-empty normalized script today, but kept as a safe fallback.
-          return new Text(theme.fg("toolTitle", theme.bold(block)), 0, 0);
+          return new Text(header, 0, 0);
         }
-        const header = theme.fg("toolTitle", theme.bold(block.slice(0, headerEnd)));
         const body = theme.fg("muted", block.slice(headerEnd + 1));
         return new Text(`${header}\n${body}`, 0, 0);
       }
@@ -831,6 +839,51 @@ function normalizeWorkflowToolArgs(args: unknown): WorkflowToolInput {
 
 /** Max number of script lines shown in the renderCall review block before truncating (Claude Code: 400). */
 const MAX_DISPLAY_SCRIPT_LINES = 400;
+/** Max script lines shown in the collapsed renderCall preview before the expand note (pi's write tool: 10). */
+const MAX_COLLAPSED_SCRIPT_LINES = 10;
+
+/**
+ * Display header for a generated workflow script: the generic
+ * "workflow — generated script" title, enriched with the parsed meta.name when
+ * it can be read. parseWorkflowScript THROWS on invalid scripts, so guard it
+ * and fall back to the generic header.
+ */
+function workflowScriptHeader(normalized: string): string {
+  let header = "workflow — generated script";
+  try {
+    const name = parseWorkflowScript(normalized).meta.name;
+    if (typeof name === "string" && name.trim().length > 0) {
+      header = `workflow — generated script: ${name.trim()}`;
+    }
+  } catch {
+    // Invalid / partial script: keep the generic header.
+  }
+  return header;
+}
+
+/**
+ * Compact, themed preview of the generated script for the COLLAPSED tool box,
+ * mirroring pi's tool-output collapse convention (native read/bash/write gate
+ * long call payloads on ToolRenderContext.expanded, toggled with Ctrl+O): the
+ * first few gutter lines plus a "more lines" note carrying the expand hint.
+ * The full script renders only when tool output is expanded. PURE and total:
+ * never throws, even on malformed scripts.
+ */
+function collapsedScriptBlock(normalized: string, theme: Theme): string {
+  const rawLines = normalized.split("\n");
+  const shown = rawLines.slice(0, MAX_COLLAPSED_SCRIPT_LINES);
+  const lines = shown.map((line) => `│ ${line}`.replace(/\s+$/, ""));
+  if (rawLines.length > MAX_COLLAPSED_SCRIPT_LINES) {
+    const remaining = rawLines.length - MAX_COLLAPSED_SCRIPT_LINES;
+    // keyText resolves the user's actual app.tools.expand binding inside pi
+    // (default Ctrl+O); outside the app (tests, bare SDK) it falls back.
+    const expandKey = keyText("app.tools.expand") || "Ctrl+O";
+    lines.push(
+      `${theme.fg("muted", `… (${remaining} more of ${rawLines.length} lines, `)}${theme.fg("dim", expandKey)}${theme.fg("muted", " to expand)")}`,
+    );
+  }
+  return lines.join("\n");
+}
 
 /**
  * Build a readable, themeable display block for the generated workflow script so the
@@ -846,18 +899,7 @@ const MAX_DISPLAY_SCRIPT_LINES = 400;
  */
 export function formatWorkflowScriptForDisplay(script: string): string {
   const normalized = normalizeWorkflowScript(script);
-
-  // Best-effort meta.name for a friendlier header; parseWorkflowScript THROWS on
-  // invalid scripts, so guard it and fall back to the generic header.
-  let header = "workflow — generated script";
-  try {
-    const name = parseWorkflowScript(normalized).meta.name;
-    if (typeof name === "string" && name.trim().length > 0) {
-      header = `workflow — generated script: ${name.trim()}`;
-    }
-  } catch {
-    // Invalid / partial script: keep the generic header.
-  }
+  const header = workflowScriptHeader(normalized);
 
   const rawLines = normalized.split("\n");
   const truncated = rawLines.length > MAX_DISPLAY_SCRIPT_LINES;

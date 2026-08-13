@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.8.8 - 2026-08-13
+
+### Changed
+- The `workflow` tool call now honors Pi's tool-output collapse convention: the generated script renders as a compact preview (first 10 gutter lines plus a "more lines" note) while tool output is collapsed, and only expands to the full script when tool output is expanded (Ctrl+O). Short scripts still render in full, and saved-workflow/script-file invocations are unchanged.
+
+### Validated
+- Added renderCall coverage for the collapsed preview, the expand note, and the full expanded block.
+- Biome check, build, extension typecheck, and all 171 unit/integration tests pass against Pi 0.83.0.
+
 ## 1.8.7 - 2026-08-04
 
 ### Added

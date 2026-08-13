@@ -86,6 +86,11 @@ function getRenderCall() {
   return renderCall.bind(tool);
 }
 
+// ToolRenderContext stub: renderCall only reads context.expanded.
+const renderContextStub = { expanded: false } as unknown as Parameters<
+  NonNullable<ReturnType<typeof createWorkflowTool>["renderCall"]>
+>[2];
+
 test("workflow extension renders completed workflow_result snapshots in session history", () => {
   type Renderer = (
     message: unknown,
@@ -221,12 +226,38 @@ test("the on-demand workflow guide advertises the live catalog while full tools 
   assert.equal(tasks.promptGuidelines, undefined);
 });
 
-test("renderCall renders the generated script for a non-empty script arg", () => {
+test("renderCall renders the full generated script when tool output is expanded", () => {
   const renderCall = getRenderCall();
-  const component = renderCall({ script: validScript }, themeStub);
+  const component = renderCall({ script: validScript }, themeStub, { ...renderContextStub, expanded: true });
   const rendered = component.render(120).join("\n");
   assert.match(rendered, /workflow — generated script/);
   assert.match(rendered, /│ phase\('Scan'\)/);
+});
+
+test("renderCall collapses the generated script by default with a preview and expand note", () => {
+  const renderCall = getRenderCall();
+  const longScript = `export const meta = { name: 'big', description: 'big' }\n${Array.from(
+    { length: 25 },
+    (_, i) => `log('line ${i}')`,
+  ).join("\n")}`;
+
+  const collapsed = renderCall({ script: longScript }, themeStub, renderContextStub);
+  const collapsedText = collapsed.render(120).join("\n");
+  assert.match(collapsedText, /workflow — generated script: big/);
+  // Preview only: early lines shown, tail hidden, expand note present.
+  assert.match(collapsedText, /│ log\('line 0'\)/);
+  assert.doesNotMatch(collapsedText, /│ log\('line 20'\)/);
+  assert.match(collapsedText, /16 more of 26 lines/);
+  assert.match(collapsedText, /to expand/);
+});
+
+test("renderCall shows short scripts fully even when collapsed", () => {
+  const renderCall = getRenderCall();
+  const component = renderCall({ script: validScript }, themeStub, renderContextStub);
+  const rendered = component.render(120).join("\n");
+  assert.match(rendered, /workflow — generated script/);
+  assert.match(rendered, /│ return \{ ok: true \}/);
+  assert.doesNotMatch(rendered, /to expand/);
 });
 
 test("renderCall falls back to the plain workflow title when there is no usable script", () => {
@@ -234,7 +265,7 @@ test("renderCall falls back to the plain workflow title when there is no usable 
   // A fence that is empty once stripped must also fall back, not render a
   // "generated script" header above an empty body.
   for (const args of [undefined, {}, { script: "" }, { script: "   " }, { script: 42 }, { script: "```js\n\n```" }]) {
-    const component = renderCall(args as { script?: unknown }, themeStub);
+    const component = renderCall(args as { script?: unknown }, themeStub, renderContextStub);
     const rendered = component.render(120).join("\n").trim();
     assert.equal(rendered, "workflow", `expected fallback title for args=${JSON.stringify(args)}`);
   }
@@ -242,8 +273,10 @@ test("renderCall falls back to the plain workflow title when there is no usable 
 
 test("renderCall never throws", () => {
   const renderCall = getRenderCall();
-  assert.doesNotThrow(() => renderCall({ script: "```js\nnot valid {{{" }, themeStub));
-  assert.doesNotThrow(() => renderCall(null as unknown as { script?: unknown }, themeStub));
+  assert.doesNotThrow(() => renderCall({ script: "```js\nnot valid {{{" }, themeStub, renderContextStub));
+  assert.doesNotThrow(() => renderCall(null as unknown as { script?: unknown }, themeStub, renderContextStub));
+  // A missing render context must still render (collapsed), never throw.
+  assert.doesNotThrow(() => renderCall({ script: validScript }, themeStub, undefined));
 });
 
 test("/workflows command lists saved workflows (built-ins + project) via a workflow_list message", async () => {
