@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Updated the locked `@earendil-works/pi-*` development baseline from 0.83.0 to 0.84.1 and synchronized the lockfile root metadata with package version 1.8.8. Runtime source and peer ranges are unchanged.
+
+### Validated
+- Pi 0.84.1 keeps the public AgentSession, extension lifecycle, dynamic-tool loading, and reused TUI component contracts used by this package unchanged.
+- Biome check, build, extension typecheck, and all 171 unit/integration tests pass against Pi 0.84.1.
+
 ## 1.8.8 - 2026-08-13
 
 ### Changed
