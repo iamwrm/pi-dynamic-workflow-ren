@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Documentation
+- Pinned live Pi/TUI qualification to `openai-codex/gpt-5.6-luna` unless the owner explicitly requests another model; silent substitution with a smaller, cheaper, or similarly named model is not acceptable. Evidence must record the exact provider/model, thinking level, run ID, and retained parent session.
+
+### Validated
+- Re-ran the 1.9.0 terminal-handoff scenario on Pi 0.84.2 with `openai-codex/gpt-5.6-luna` at minimal thinking. Parent and child both used the designated model, run `wf_01a6dc44-64b` completed, and the parent sequence remained `assistant(workflow call) → running tool result → workflow_result → assistant(final)` with no acknowledgement provider response.
+
 ## 1.9.0 - 2026-08-15
 
 ### Changed

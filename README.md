@@ -398,6 +398,12 @@ npm run dev
 
 Parser unit tests live in `tests/workflow-parser.test.ts` and cover both accepted and rejected script shapes.
 
+Live Pi/TUI qualification for this package uses
+`openai-codex/gpt-5.6-luna` unless the owner explicitly specifies another
+model. Do not silently substitute a smaller, cheaper, or similarly named model;
+record the exact provider/model, thinking level, run ID, and retained parent
+session with the evidence.
+
 ## rencc improvements over the prototype
 
 This fork closes several Claude-Code-style gaps in the original prototype:

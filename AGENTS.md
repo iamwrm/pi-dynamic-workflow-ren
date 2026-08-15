@@ -8,6 +8,11 @@
 - `npm test` runs Biome, TypeScript build, extension typechecking, and unit tests.
 - The CI workflow also verifies installing the tested commit with `pi install`
   through the repository's HTTPS Git URL.
+- Live Pi/TUI qualification for this package must use
+  `openai-codex/gpt-5.6-luna` unless the owner explicitly names another model.
+  Do not silently substitute a smaller, cheaper, or similarly named model.
+  Record the exact provider/model, thinking level, run ID, and retained parent
+  session with the result.
 
 ## Release and compatibility
 
