@@ -649,6 +649,7 @@ test("workflow tool exposes resumeFromRunId and replays a prior run journal", as
   const tool1 = createWorkflowTool({ cwd: process.cwd(), journalDir, agent: runner1 });
   const first = await tool1.execute("resume-1", { script }, undefined, undefined, fakeCtx);
   assert.equal(runner1.calls, 1);
+  assert.equal(first.terminate, undefined, "foreground completion must not terminate its parent turn");
   const runId = (first.details as { runId?: string }).runId;
   assert.match(runId ?? "", /^wf_[0-9a-f-]{12}$/);
 
@@ -656,6 +657,7 @@ test("workflow tool exposes resumeFromRunId and replays a prior run journal", as
   const tool2 = createWorkflowTool({ cwd: process.cwd(), journalDir, agent: runner2 });
   const second = await tool2.execute("resume-2", { script, resumeFromRunId: runId }, undefined, undefined, fakeCtx);
   assert.equal(runner2.calls, 0, "resumeFromRunId must replay the journal without spawning the subagent");
+  assert.equal(second.terminate, undefined, "foreground resume must keep normal tool continuation semantics");
   assert.equal((second.details as { runId?: string }).runId, runId);
   assert.equal(
     JSON.stringify((second.details as { result?: unknown }).result),
@@ -775,6 +777,7 @@ test("workflow tool: TUI mode backgrounds, returns a runId immediately, and noti
   // Returned immediately with a running status + runId, NOT the final result.
   const details = immediate.details as { runId?: string; status?: string };
   assert.equal(details.status, "running");
+  assert.equal(immediate.terminate, true, "an accepted detached handoff must end the launching parent turn");
   assert.match(details.runId ?? "", /^wf_[0-9a-f-]{12}$/);
   const text = immediate.content?.[0];
   assert.ok(text?.type === "text" && /started in background/.test(text.text));

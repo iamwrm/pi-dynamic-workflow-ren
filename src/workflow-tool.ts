@@ -193,6 +193,8 @@ export type WorkflowToolInput = {
 
 /** Outcome delivered back to the session when a backgrounded run finishes. */
 export interface WorkflowBackgroundResult {
+  /** Internal tool-instance ordinal used to deduplicate one invocation's callback. */
+  deliveryId: number;
   runId: string;
   name: string;
   status: "completed" | "failed" | "aborted";
@@ -215,9 +217,10 @@ export interface WorkflowToolOptions {
   getThinkingLevel?: () => import("@earendil-works/pi-agent-core").ThinkingLevel | undefined;
   /**
    * Deliver a backgrounded run's outcome back to the session (mirrors Claude
-   * Code's <task-notification>). The extension entrypoint wires this to
-   * pi.sendMessage({...}, { triggerTurn: true }) so the idle model continues.
-   * Only ever called on the background (interactive) path.
+   * Code's <task-notification>). The extension entrypoint queues this until the
+   * parent is idle, then uses pi.sendMessage({...}, { triggerTurn: true }) so the
+   * model continues in one fresh turn per completion. Only ever called on the
+   * background (interactive) path.
    */
   sendResult?: (result: WorkflowBackgroundResult) => void;
   /**
@@ -330,7 +333,7 @@ export function buildWorkflowPromptGuidelines(options: WorkflowGuideOptions = {}
     "For workflow, subagents inherit the parent session's model and thinking level by default. opts.model overrides the subagent's model for real ('provider/model-id' or a model id known to the session). opts.agentType resolves a named agent definition from ~/.pi/agent/agents/*.md or .pi/agents/*.md (role prompt + optional model/tool allowlist). Unresolvable references fall back to prompt hints and are logged.",
     "For workflow, opts.isolation: 'worktree' runs the agent in a REAL disposable git worktree (detached checkout of the repo). Use it ONLY when agents mutate files in parallel and would conflict - it costs setup time and disk. Unchanged worktrees are auto-removed; changed ones are kept and their paths logged.",
     "For workflow, to resume a previous workflow run, pass its runId as resumeFromRunId; resume invalidation is per-call content-addressed (ordinal + prompt + label + schema + per-agent options), not Claude-Code prefix-based, so thread upstream results into downstream prompts so changing an earlier step forces dependent steps to re-run on resume.",
-    "For workflow, in an interactive session the run executes in the BACKGROUND: the tool returns immediately with a runId and status 'running', then delivers the completed result as a follow-up message once it finishes - do not block waiting for it. In non-interactive (-p/print/RPC) mode the tool runs in the foreground and returns the full result synchronously.",
+    "For workflow, in an interactive session the run executes in the BACKGROUND: the tool returns immediately with a runId and status 'running' and ends the current parent turn without an acknowledgement round. Once finished, it delivers the completed result in one fresh parent turn - do not block waiting for it. In non-interactive (-p/print/RPC) mode the tool runs in the foreground and returns the full result synchronously.",
     "For workflow, an accepted background run has an independent cancellation lifetime: aborting a later parent turn does not stop it. Use workflow_tasks {action: 'kill', runId} (or agentIds for selected subagents) when the user asks to stop workflow work.",
   ];
 }
@@ -354,6 +357,7 @@ export function buildWorkflowGuide(options: WorkflowGuideOptions = {}): string {
 }
 
 export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefinition<typeof workflowToolSchema, any> {
+  let nextDeliveryId = 0;
   return defineTool({
     name: "workflow",
     label: "Workflow",
@@ -598,6 +602,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       const canBackground = interactiveTui && typeof options.sendResult === "function";
 
       if (canBackground) {
+        const deliveryId = ++nextDeliveryId;
         // A background run becomes an independently owned task when this execute()
         // call returns status "running". Relay the originating tool signal only while
         // the launch is being registered; keeping it composed after return would let
@@ -647,6 +652,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
             // in-flight progress.
             try {
               sendResult({
+                deliveryId,
                 runId,
                 name: parsed.meta.name,
                 status,
@@ -679,6 +685,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
             }
             try {
               sendResult({
+                deliveryId,
                 runId,
                 name: parsed.meta.name,
                 status,
@@ -745,6 +752,10 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
             status: "running",
             ...(scriptFilePath ? { scriptPath: scriptFilePath } : {}),
           },
+          // The detached run owns its continuation. Ending the parent here avoids
+          // an otherwise-wasted provider round whose only job is to acknowledge
+          // status "running"; completion later triggers one fresh parent turn.
+          terminate: true,
         };
       }
 

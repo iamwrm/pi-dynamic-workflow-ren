@@ -19,7 +19,11 @@ type ToolSpec = {
     signal?: AbortSignal,
     onUpdate?: unknown,
     ctx?: unknown,
-  ) => Promise<{ content: Array<{ type: string; text?: string }>; details?: Record<string, unknown> }>;
+  ) => Promise<{
+    content: Array<{ type: string; text?: string }>;
+    details?: Record<string, unknown>;
+    terminate?: boolean;
+  }>;
 };
 
 type CommandSpec = {
@@ -55,6 +59,14 @@ function toolResultText(result: { content: Array<{ type: string; text?: string }
     .filter((item) => item.type === "text" && typeof item.text === "string")
     .map((item) => item.text)
     .join("\n");
+}
+
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) assert.fail(message);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 function createExtensionHarness(
@@ -392,4 +404,53 @@ test("/run-workflow parse failures do not activate tools or add workflow context
   assert.equal(harness.appendedEntries.length, 0);
   assert.equal(harness.sentMessages.length, 0);
   assert.match(harness.notifications[0]?.message ?? "", /Unknown workflow/);
+});
+
+test("a fast background result terminates launch, waits for settlement, and triggers one fresh turn", async () => {
+  const harness = createExtensionHarness({ active: ["workflow_load", "workflow"] });
+  harness.ctx.mode = "tui";
+  harness.ctx.hasUI = true;
+  await harness.emit("session_start", { type: "session_start", reason: "startup" });
+  harness.clearObservations();
+
+  // Model turn that launches the workflow is active. An already-aborted signal
+  // makes the detached run complete immediately without invoking a real model.
+  await harness.emit("agent_start", { type: "agent_start" });
+  const controller = new AbortController();
+  controller.abort();
+  const workflow = harness.tools.get("workflow");
+  assert.ok(workflow);
+  const immediate = await workflow.execute(
+    "background-fast",
+    {
+      script:
+        "export const meta = { name: 'fast_background', description: 'delivery lifecycle test' }\nawait agent('x')\nreturn 1",
+    },
+    controller.signal,
+    undefined,
+    harness.ctx,
+  );
+
+  assert.equal(immediate.details?.status, "running");
+  assert.equal(immediate.terminate, true);
+  await waitFor(
+    () => harness.notifications.some((entry) => /aborted/.test(entry.message)),
+    "detached workflow did not settle",
+  );
+  assert.equal(
+    harness.sentMessages.filter((entry) => entry.message.customType === "workflow_result").length,
+    0,
+    "completion must remain queued while the launching parent is active",
+  );
+
+  await harness.emit("agent_settled", { type: "agent_settled" });
+  await waitFor(
+    () => harness.sentMessages.some((entry) => entry.message.customType === "workflow_result"),
+    "queued completion was not delivered after settlement",
+  );
+  const delivered = harness.sentMessages.filter((entry) => entry.message.customType === "workflow_result");
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].options?.triggerTurn, true);
+
+  await harness.emit("session_shutdown", { type: "session_shutdown", reason: "test" });
 });

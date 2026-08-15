@@ -17,6 +17,7 @@ import {
   WorkflowInspector,
   type WorkflowSnapshot,
 } from "../src/index.js";
+import { createWorkflowResultDeliveryCoordinator } from "../src/result-delivery.js";
 
 export const WORKFLOW_LOAD_TOOL_NAME = "workflow_load";
 export const WORKFLOW_TOOLS_LOADED_ENTRY = "pi-dynamic-workflow-rencc:tools-loaded";
@@ -87,6 +88,21 @@ export default function extension(pi: ExtensionAPI) {
     return box;
   });
 
+  // Detached workflows can finish before their launching tool turn settles, while
+  // another parent turn is active, or concurrently. Queue completions until idle
+  // and serialize them into exactly one trigger-turn model run per workflow.
+  const resultDelivery = createWorkflowResultDeliveryCoordinator((result) => {
+    pi.sendMessage(
+      {
+        customType: "workflow_result",
+        content: [{ type: "text", text: result.text }],
+        display: true,
+        details: result.details,
+      },
+      { triggerTurn: true },
+    );
+  });
+
   const workflowTool = createWorkflowTool({
     // ExtensionContext (the tool-execute ctx) has no thinking-level accessor; only
     // the `pi` ExtensionAPI exposes getThinkingLevel(). Close over `pi` so subagents
@@ -124,26 +140,9 @@ export default function extension(pi: ExtensionAPI) {
       });
     },
 
-    // Deliver a backgrounded run's outcome back to the session (Claude Code's
-    // <task-notification>). triggerTurn:true makes the idle model continue; the
-    // call is fire-and-forget and may throw if the runner went stale after a
-    // session switch, so guard it.
-    sendResult: (result) => {
-      try {
-        pi.sendMessage(
-          {
-            customType: "workflow_result",
-            content: [{ type: "text", text: result.text }],
-            display: true,
-            details: result.details,
-          },
-          { triggerTurn: true },
-        );
-      } catch {
-        // Runner stale (e.g. session was switched/disposed before delivery). The
-        // result is unrecoverable here; dropping it is the only safe option.
-      }
-    },
+    // Completion delivery is extension-owned: the coordinator gates it on parent
+    // settlement, deduplicates by runId, and serializes concurrent completions.
+    sendResult: (result) => resultDelivery.enqueue(result),
   });
 
   // Model-visible live-run registry (list/status/kill), backed by the same
@@ -418,8 +417,13 @@ export default function extension(pi: ExtensionAPI) {
         );
         return;
       }
+      let releaseResultDelivery: (() => void) | undefined;
       try {
         await ctx.waitForIdle();
+        // Direct command dispatch has no parent agent_start/agent_settled pair.
+        // Hold delivery until this handler has processed the immediate result so
+        // even a workflow that finishes instantly cannot race its own launch.
+        releaseResultDelivery = resultDelivery.hold();
         const activation = activateWorkflowTools(ctx);
         if (activation.markedNow) {
           // Direct command dispatch has no loader tool result, so persist the
@@ -461,6 +465,8 @@ export default function extension(pi: ExtensionAPI) {
         }
       } catch (error) {
         ctx.ui.notify(`/run-workflow ${parsed.name} failed: ${errorMessage(error)}`, "error");
+      } finally {
+        releaseResultDelivery?.();
       }
     },
   });
@@ -505,8 +511,13 @@ export default function extension(pi: ExtensionAPI) {
   // durable marker restores both full tools. Reconcile again after /tree so
   // disclosure state follows the selected branch rather than global runtime
   // state. Custom entries survive compaction and are excluded from model input.
-  pi.on("session_start", (_event, ctx) => reconcileWorkflowTools(ctx));
+  pi.on("session_start", (_event, ctx) => {
+    resultDelivery.startSession();
+    reconcileWorkflowTools(ctx);
+  });
   pi.on("session_tree", (_event, ctx) => reconcileWorkflowTools(ctx));
+  pi.on("agent_start", () => resultDelivery.agentStarted());
+  pi.on("agent_settled", () => resultDelivery.agentSettled());
 
   // On shutdown (quit / reload / new / resume / fork) abort all in-flight
   // background runs, then AWAIT them. The handler is awaited before
@@ -516,6 +527,9 @@ export default function extension(pi: ExtensionAPI) {
   // a fresh signal. Each settled promise is the run's own .then() (it never
   // rejects), so awaiting cannot throw.
   pi.on("session_shutdown", async () => {
+    // Close delivery before aborting runs: their abort callbacks may enqueue while
+    // shutdown awaits them, and no old-session result may enter a replacement.
+    resultDelivery.shutdown();
     shutdownController.abort();
     const inflight = [...pending.values()];
     const clears = [...liveUiClears.values()];

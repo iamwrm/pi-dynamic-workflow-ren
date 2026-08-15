@@ -2,12 +2,21 @@
 
 ## Unreleased
 
+## 1.9.0 - 2026-08-15
+
 ### Changed
-- Updated the locked `@earendil-works/pi-*` development baseline from 0.83.0 to 0.84.1 and synchronized the lockfile root metadata with package version 1.8.8. Runtime source and peer ranges are unchanged.
+- Accepted interactive background launches now return `terminate: true`, ending the launching parent turn without an acknowledgement-only provider round. Foreground print/JSON/RPC execution remains non-terminal and returns the final workflow result normally.
+- Background completion delivery now waits for parent `agent_settled`, deduplicates callbacks per tool invocation (without blocking resumed runs that reuse a `runId`), and serializes concurrent completions into one `workflow_result`-triggered parent turn apiece. Model-free `/run-workflow` dispatch uses a short delivery hold, and session shutdown closes the queue before aborting detached runs.
+- Updated the locked `@earendil-works/pi-*` development baseline from 0.83.0 to 0.84.1 and synchronized the lockfile root metadata with package version 1.9.0. Runtime source and peer ranges are unchanged.
+
+### Retained
+- `agent(..., { schema })` and its terminal child-only `structured_output` tool remain intact: typed intermediate values are consumed inside workflow JavaScript and are not replaceable by the workflow tool's final parent-result boundary.
 
 ### Validated
 - Pi 0.84.1 keeps the public AgentSession, extension lifecycle, dynamic-tool loading, and reused TUI component contracts used by this package unchanged.
-- Biome check, build, extension typecheck, and all 171 unit/integration tests pass against Pi 0.84.1.
+- Added lifecycle coverage for fast completion before launch settlement, concurrent serialization, deduplication, direct-dispatch holds, session cleanup, failed delivery, terminal background handoff, and unchanged foreground semantics.
+- Biome check, build, extension typecheck, and all 178 unit/integration tests pass.
+- A live Pi 0.84.2 TUI run produced the exact parent sequence `assistant(workflow call) → running tool result → workflow_result → assistant(final)`, with no acknowledgement assistant response between launch and completion.
 
 ## 1.8.8 - 2026-08-13
 
