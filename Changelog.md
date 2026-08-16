@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- The live background progress widget now shows token, tool, and elapsed
+  metrics for running subagents (same parenthetical as completed rows) and
+  refreshes them on a 400ms timer from live session telemetry.
 - Mid-turn compaction boundaries now survive inside subagent sessions. When an
   extension (for example the mid-turn-compact extension) deliberately aborts a
   child's tool-follow-up turn to compact and then queues a continuation user
@@ -26,6 +29,7 @@
 
 ### Validated
 - Re-ran the 1.9.0 terminal-handoff scenario on Pi 0.84.2 with `openai-codex/gpt-5.6-luna` at minimal thinking. Parent and child both used the designated model, run `wf_01a6dc44-64b` completed, and the parent sequence remained `assistant(workflow call) → running tool result → workflow_result → assistant(final)` with no acknowledgement provider response.
+- Biome check, build, extension typecheck, and all 186 unit/integration tests pass.
 
 ## 1.9.0 - 2026-08-15
 

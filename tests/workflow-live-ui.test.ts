@@ -202,8 +202,79 @@ test("registered live snapshots poll changing subagent token usage before comple
     await agentStarted;
     assert.ok(readSnapshot, "background registration must expose getSnapshot");
     assert.equal(readSnapshot().agents[0]?.tokens, 1_200);
+    assert.equal(readSnapshot().agents[0]?.toolCalls, 1);
     tokens = 2_345;
     assert.equal(readSnapshot().agents[0]?.tokens, 2_345, "each poll must read fresh session telemetry");
+    releaseAgent();
+    await deliveryDone;
+  } finally {
+    releaseAgent();
+  }
+});
+
+test("live widget shows running subagent token and elapsed metrics", async () => {
+  const rec = recordingUi();
+  let markAgentStarted!: () => void;
+  const agentStarted = new Promise<void>((resolve) => {
+    markAgentStarted = resolve;
+  });
+  let releaseAgent!: () => void;
+  const agentReleased = new Promise<void>((resolve) => {
+    releaseAgent = resolve;
+  });
+  let resolveDelivery!: () => void;
+  const deliveryDone = new Promise<void>((resolve) => {
+    resolveDelivery = resolve;
+  });
+  const runner = {
+    run: async (
+      _prompt: string,
+      options?: {
+        onSessionHandle?: (handle: {
+          getMessages: () => readonly unknown[];
+          getTelemetry: () => WorkflowAgentTelemetry;
+        }) => void;
+        onTelemetry?: (value: WorkflowAgentTelemetry) => void;
+      },
+    ) => {
+      options?.onSessionHandle?.({ getMessages: () => [], getTelemetry: () => telemetry(45_200) });
+      markAgentStarted();
+      await agentReleased;
+      options?.onTelemetry?.(telemetry(45_200));
+      return "ok";
+    },
+  };
+  const tool = createWorkflowTool({
+    cwd: process.cwd(),
+    journalDir: tmpJournalDir(),
+    agent: runner,
+    liveRefreshMs: 20,
+    sendResult: () => resolveDelivery(),
+  });
+  const fakeCtx = { cwd: process.cwd(), hasUI: true, ui: rec.ui } as never;
+
+  try {
+    await tool.execute(
+      "bg-live-widget-metrics",
+      { script: `${META}\nawait agent('measure', { label: 'metered' })\nreturn 1` },
+      undefined,
+      undefined,
+      fakeCtx,
+    );
+    await agentStarted;
+
+    const deadline = Date.now() + 1000;
+    let frame = "";
+    while (Date.now() < deadline) {
+      frame =
+        rec.widgetCalls
+          .filter((call): call is { key: string; content: string[] } => Array.isArray(call.content))
+          .at(-1)
+          ?.content.join("\n") ?? "";
+      if (/metered \(45\.2k tok · 1 tool · /.test(frame) && frame.includes("●")) break;
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    assert.match(frame, /#1 ● metered \(45\.2k tok · 1 tool · /);
     releaseAgent();
     await deliveryDone;
   } finally {

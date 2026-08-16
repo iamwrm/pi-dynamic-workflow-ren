@@ -77,6 +77,18 @@ On an unloaded branch the model first calls `workflow_load`, then writes a workf
     #3 ✓ final summary
 ```
 
+While agents are still running, each row shows the same token / tool / elapsed
+parenthetical as a completed row, refreshed from live session telemetry:
+
+```text
+◆ Workflow: inspect_project (1/3 done, 2 running)
+  ✓ Scan 1/1
+    #1 ✓ repo inventory (12.4k tok · 3 tools · 18s)
+  ▶ Analyze 0/2 · 2 running
+    #2 ● source modules (4.1k tok · 1 tool · 6.2s)
+    #3 ● final summary (1.1s)
+```
+
 Once a TUI run reports `started in background`, the launching parent turn ends immediately—there is no extra model round just to acknowledge the launch—and the run owns an independent cancellation lifetime. Use `/kill-workflow <runId>`, press `K` on its run in `/workflows`, or ask the main agent to call `workflow_tasks {action: 'kill', runId}`. `Esc` still cancels a foreground workflow or a launch that has not handed off, but aborting a later main-agent turn does not kill an accepted background run.
 
 ### Saved workflows and `/workflows`

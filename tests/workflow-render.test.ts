@@ -168,6 +168,69 @@ test("renderWorkflowLines shows completed subagent token/tool/elapsed metrics", 
   assert.match(lines, /metered agent \(123 tok · 2 tools · 1\.5s\)/);
 });
 
+test("renderWorkflowLines shows live token/tool/elapsed metrics for running subagents", () => {
+  const now = 1_000_000;
+  const lines = renderWorkflowLines(
+    {
+      name: "code-review",
+      phases: ["Scope", "Review"],
+      currentPhase: "Review",
+      logs: [],
+      agentCount: 4,
+      runningCount: 2,
+      doneCount: 1,
+      errorCount: 0,
+      agents: [
+        {
+          id: 1,
+          label: "scope change set",
+          phase: "Scope",
+          prompt: "scope",
+          status: "done",
+          tokens: 188200,
+          toolCalls: 16,
+          elapsedMs: 82_000,
+        },
+        {
+          id: 2,
+          label: "review: correctness",
+          phase: "Review",
+          prompt: "correctness",
+          status: "running",
+          startedAtMs: now - 65_000,
+          tokens: 45200,
+          toolCalls: 8,
+        },
+        {
+          id: 3,
+          label: "review: security",
+          phase: "Review",
+          prompt: "security",
+          status: "running",
+          startedAtMs: now - 1500,
+        },
+        {
+          id: 4,
+          label: "queued later",
+          phase: "Review",
+          prompt: "later",
+          status: "queued",
+          tokens: 99,
+          toolCalls: 3,
+          elapsedMs: 9_000,
+        },
+      ],
+    },
+    { now: () => now },
+  ).join("\n");
+
+  assert.match(lines, /scope change set \(188\.2k tok · 16 tools · 1m22s\)/);
+  assert.match(lines, /review: correctness \(45\.2k tok · 8 tools · 1m05s\)/);
+  assert.match(lines, /review: security \(1\.5s\)/);
+  assert.match(lines, /#4 ○ queued later$/m);
+  assert.doesNotMatch(lines, /queued later \(/);
+});
+
 test("formatTokens humanizes large counts (k/m) and leaves small ones alone", () => {
   assert.equal(formatTokens(847), "847");
   assert.equal(formatTokens(5000), "5k");

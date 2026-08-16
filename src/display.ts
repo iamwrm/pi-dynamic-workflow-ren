@@ -93,6 +93,8 @@ export interface WorkflowDisplayOptions {
   maxLogs?: number;
   showStatus?: boolean;
   showResultPreviews?: boolean;
+  /** Clock for live running-agent elapsed (injectable in tests). */
+  now?: () => number;
 }
 
 export function createWorkflowSnapshot(meta: WorkflowMeta): WorkflowSnapshot {
@@ -181,6 +183,7 @@ export function renderWorkflowLines(snapshot: WorkflowSnapshot, options: Workflo
   const maxAgents = options.maxAgents ?? 8;
   const maxLogs = options.maxLogs ?? 2;
   const showResultPreviews = options.showResultPreviews ?? false;
+  const now = options.now?.() ?? Date.now();
   const state =
     snapshot.errorCount > 0
       ? `, ${snapshot.errorCount} errors`
@@ -210,7 +213,7 @@ export function renderWorkflowLines(snapshot: WorkflowSnapshot, options: Workflo
     const visibleAgents = agents.slice(-maxAgents);
     for (const agent of visibleAgents) {
       const order = `#${agent.id}`;
-      const metrics = formatAgentMetrics(agent);
+      const metrics = formatAgentMetrics(agent, now);
       const result = showResultPreviews && agent.resultPreview ? ` — ${agent.resultPreview}` : "";
       lines.push(`    ${order} ${statusIcon(agent.status)} ${shorten(agent.label, 48)}${metrics}${result}`);
     }
@@ -222,7 +225,7 @@ export function renderWorkflowLines(snapshot: WorkflowSnapshot, options: Workflo
   if (unphased.length) {
     lines.push("  Unphased");
     for (const agent of unphased.slice(-maxAgents)) {
-      const metrics = formatAgentMetrics(agent);
+      const metrics = formatAgentMetrics(agent, now);
       const result = showResultPreviews && agent.resultPreview ? ` — ${agent.resultPreview}` : "";
       lines.push(`    #${agent.id} ${statusIcon(agent.status)} ${shorten(agent.label, 48)}${metrics}${result}`);
     }
@@ -256,13 +259,21 @@ export function formatTokens(tokens: number): string {
   return `${scaled.toFixed(1).replace(/\.0$/, "")}${millions ? "m" : "k"}`;
 }
 
-function formatAgentMetrics(agent: WorkflowAgentSnapshot): string {
-  if (agent.status === "running" || agent.status === "queued") return "";
-  const parts = [];
+function formatAgentMetrics(agent: WorkflowAgentSnapshot, now: number): string {
+  if (agent.status === "queued") return "";
+  const parts: string[] = [];
   if (typeof agent.tokens === "number")
     parts.push(`${agent.estimatedTokens ? "~" : ""}${formatTokens(agent.tokens)} tok`);
-  if (typeof agent.toolCalls === "number") parts.push(`${agent.toolCalls} ${agent.toolCalls === 1 ? "tool" : "tools"}`);
-  if (typeof agent.elapsedMs === "number") parts.push(formatDuration(agent.elapsedMs));
+  if (typeof agent.toolCalls === "number" && (agent.status !== "running" || agent.toolCalls > 0)) {
+    parts.push(`${agent.toolCalls} ${agent.toolCalls === 1 ? "tool" : "tools"}`);
+  }
+  const elapsedMs =
+    agent.status === "running" && typeof agent.startedAtMs === "number"
+      ? Math.max(0, now - agent.startedAtMs)
+      : typeof agent.elapsedMs === "number"
+        ? agent.elapsedMs
+        : undefined;
+  if (typeof elapsedMs === "number") parts.push(formatDuration(elapsedMs));
   return parts.length ? ` (${parts.join(" · ")})` : "";
 }
 
