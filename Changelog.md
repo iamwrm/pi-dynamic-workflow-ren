@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Added
+- Mid-turn compaction boundaries now survive inside subagent sessions. When an
+  extension (for example the mid-turn-compact extension) deliberately aborts a
+  child's tool-follow-up turn to compact and then queues a continuation user
+  message, the continuation run starts on its own before `session.prompt()`
+  resolves. The engine now detects that self-started run (or an in-flight
+  manual compaction) from the child's native lifecycle events, waits for the
+  continuation's terminal, and returns it as the attempt's result instead of
+  declaring "Subagent provider failed: This operation was aborted" and
+  disposing the session mid-continuation. Repeated boundaries continue through
+  every continuation run; real provider errors without any boundary evidence
+  still fail immediately (zero regression), and a continuation that ends in a
+  real provider error surfaces that error after at most a bounded 500 ms
+  evidence grace. Stall, whole-run abort, and manual kill signals release a
+  pending boundary wait immediately.
+- SDK-level regression coverage for: continuation success, abort-shaped errors
+  without a continuation, failing continuations, repeated boundaries, signal
+  abort during the boundary wait, and the in-flight manual compaction path.
+
 ### Documentation
 - Pinned live Pi/TUI qualification to `openai-codex/gpt-5.6-luna` unless the owner explicitly requests another model; silent substitution with a smaller, cheaper, or similarly named model is not acceptable. Evidence must record the exact provider/model, thinking level, run ID, and retained parent session.
 
