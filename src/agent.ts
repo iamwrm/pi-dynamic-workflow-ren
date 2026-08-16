@@ -494,31 +494,34 @@ export class WorkflowAgent {
       terminalCompactionSuppressed = false;
     };
 
-    // Mid-turn boundary tracking (see promptSession below). Event sequence
-    // numbers are snapshotted at every error/aborted terminal so the
-    // post-prompt decision can distinguish an extension-initiated compaction
-    // boundary — a continuation run starts on its own before
-    // session.prompt() resolves — from a real provider failure, without
-    // waiting on time.
-    let eventSeq = 0;
-    let boundaryBaseline: { seq: number } | undefined;
-    // Seq of the first agent_start after the baseline: the continuation run.
-    let continuationStartSeq: number | undefined;
-    // Seq of the first agent_settled after that continuation start: proof the
-    // continuation settled (so a fast continuation is not waited on forever).
-    let continuationSettledSeq: number | undefined;
-    // Seq of the first compaction started after the baseline and, when seen,
-    // the last compaction_end: an in-flight manual compaction means a
-    // continuation is still on its way even though no run has started yet.
-    let compactionStartSeq: number | undefined;
-    let compactionEndSeq: number | undefined;
+    // Mid-turn boundary tracking (see promptSession below). A deliberate
+    // extension abort of a tool-follow-up turn is a boundary, not a failure,
+    // when the child session continues on its own: the continuation run starts
+    // before session.prompt() resolves. The flags below are reset at every
+    // error/aborted terminal (the boundary candidate) and updated by the
+    // native lifecycle events that follow, so the post-prompt decision never
+    // waits on time:
+    //   boundaryActive       - the last assistant terminal was error/aborted
+    //   continuationStarted  - a run started on its own after that terminal
+    //   continuationSettled  - that run settled (a fast continuation finishes
+    //                          before the post-prompt decision)
+    //   compactionStarted/Ended - a compaction ran after that terminal; while
+    //                          started and not ended it is in flight, which
+    //                          means the continuation is still on its way even
+    //                          though no run has started yet
+    let boundaryActive = false;
+    let continuationStarted = false;
+    let continuationSettled = false;
+    let compactionStarted = false;
+    let compactionEnded = false;
     let lastFinalAgentEndMessages: readonly unknown[] | undefined;
-    // Any boundary evidence seen so far in this attempt (a self-started run or
-    // a compaction). Gates the post-settle evidence grace so real failures
-    // without any boundary activity keep failing immediately.
+    // Sticky across boundaries within this attempt: any continuation or
+    // compaction evidence at all. Gates the post-settle evidence grace so
+    // real failures without any boundary activity keep failing immediately.
     let boundaryEvidenceSeen = false;
     // One bounded grace attempt per boundary for the next continuation's
-    // agent_start to appear after a settle.
+    // agent_start to appear after a settle (the fire-and-forget resume prompt
+    // runs a few microtasks of preflight before its run starts).
     let graceAttempted = false;
     // Set when any combined abort signal (stall, whole-run abort, manual kill)
     // fired, so a pending boundary wait cannot swallow an abort.
@@ -566,10 +569,9 @@ export class WorkflowAgent {
           /* stall-timer reset is best-effort */
         }
         try {
-          eventSeq += 1;
           if (event.type === "agent_start") {
-            if (boundaryBaseline && continuationStartSeq === undefined && eventSeq > boundaryBaseline.seq) {
-              continuationStartSeq = eventSeq;
+            if (boundaryActive) {
+              continuationStarted = true;
               boundaryEvidenceSeen = true;
             }
             restoreTerminalCompaction();
@@ -579,22 +581,20 @@ export class WorkflowAgent {
               lastFinalAgentEndMessages = event.messages;
             }
           } else if (event.type === "agent_settled") {
-            if (continuationStartSeq !== undefined && eventSeq > continuationStartSeq) {
-              continuationSettledSeq = eventSeq;
-            }
+            if (continuationStarted) continuationSettled = true;
             // The run that followed the boundary has settled. Its extension
             // handlers (which queue the next continuation, if any) already ran
             // before this event, so re-evaluating here sees the next run's
             // agent_start too. Wake the boundary wait.
             resolveBoundaryWait();
           } else if (event.type === "compaction_start") {
-            if (boundaryBaseline && eventSeq > boundaryBaseline.seq && compactionStartSeq === undefined) {
-              compactionStartSeq = eventSeq;
+            if (boundaryActive) {
+              compactionStarted = true;
               boundaryEvidenceSeen = true;
             }
             resolveBoundaryWait();
           } else if (event.type === "compaction_end") {
-            compactionEndSeq = eventSeq;
+            compactionEnded = true;
             resolveBoundaryWait();
           } else if (event.type === "message_end") {
             const assistant = event.message as Partial<AssistantMessage>;
@@ -602,14 +602,13 @@ export class WorkflowAgent {
               assistant.role === "assistant" &&
               (assistant.stopReason === "error" || assistant.stopReason === "aborted")
             ) {
-              // Snapshot lifecycle state at the boundary terminal so the
-              // post-prompt check can tell a mid-turn continuation from a real
-              // failure without waiting on time.
-              boundaryBaseline = { seq: eventSeq };
-              continuationStartSeq = undefined;
-              continuationSettledSeq = undefined;
-              compactionStartSeq = undefined;
-              compactionEndSeq = undefined;
+              // Reset the boundary state at the candidate terminal so the
+              // post-prompt check only sees lifecycle events that follow it.
+              boundaryActive = true;
+              continuationStarted = false;
+              continuationSettled = false;
+              compactionStarted = false;
+              compactionEnded = false;
               graceAttempted = false;
             } else if (assistant.role === "assistant" && assistant.stopReason === "stop") {
               suppressTerminalCompaction();
@@ -725,13 +724,7 @@ export class WorkflowAgent {
         // attempt's result. Without that evidence, fail exactly as before.
         for (let boundary = 0; boundary < MAX_MID_TURN_BOUNDARIES; boundary++) {
           if (terminal.stopReason !== "error" && terminal.stopReason !== "aborted") break;
-          const baseline = boundaryBaseline;
-          if (!baseline) break; // no lifecycle event observed: real failure
-          const continuationStarted = continuationStartSeq !== undefined;
-          const continuationSettled = continuationSettledSeq !== undefined;
-          const compactionInFlight =
-            compactionStartSeq !== undefined &&
-            (compactionEndSeq === undefined || compactionEndSeq < compactionStartSeq);
+          const compactionInFlight = compactionStarted && !compactionEnded;
           if (!continuationStarted && !compactionInFlight) {
             // No continuation evidence yet. A settle may have just happened
             // with the next continuation's run still in preflight (its

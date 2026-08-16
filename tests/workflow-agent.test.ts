@@ -494,25 +494,36 @@ const noopTool: ToolDefinition = {
  * the turn_start that follows a tool batch, then queue a continuation user
  * message once the run settles. Mirrors 0020-mid-turn-compact's lease shape
  * without the threshold math.
+ *
+ * With `resumeViaManualCompact`, the continuation is queued only after a
+ * fire-and-forget `ctx.compact()` completes — 0020's fallback when Pi did not
+ * compact the boundary turn itself.
  */
-function midTurnBoundaryExtension(pi: Parameters<ExtensionFactory>[0]): void {
-  let followsTools = false;
-  let boundaryPending = false;
-  pi.on("turn_end", (event) => {
-    const results = (event as { toolResults?: unknown[] }).toolResults;
-    followsTools = Array.isArray(results) && results.length > 0;
-  });
-  pi.on("turn_start", (_event, ctx) => {
-    if (!followsTools) return;
-    followsTools = false;
-    boundaryPending = true;
-    ctx.abort();
-  });
-  pi.on("agent_settled", () => {
-    if (!boundaryPending) return;
-    boundaryPending = false;
-    pi.sendUserMessage(MID_TURN_CONTINUE_PROMPT);
-  });
+function midTurnBoundaryExtension(options: { resumeViaManualCompact?: boolean } = {}): ExtensionFactory {
+  return (pi) => {
+    let followsTools = false;
+    let boundaryPending = false;
+    const resume = (): void => pi.sendUserMessage(MID_TURN_CONTINUE_PROMPT);
+    pi.on("turn_end", (event) => {
+      const results = (event as { toolResults?: unknown[] }).toolResults;
+      followsTools = Array.isArray(results) && results.length > 0;
+    });
+    pi.on("turn_start", (_event, ctx) => {
+      if (!followsTools) return;
+      followsTools = false;
+      boundaryPending = true;
+      ctx.abort();
+    });
+    pi.on("agent_settled", (_event, ctx) => {
+      if (!boundaryPending) return;
+      boundaryPending = false;
+      if (options.resumeViaManualCompact) {
+        ctx.compact({ onComplete: resume, onError: resume });
+      } else {
+        resume();
+      }
+    });
+  };
 }
 
 function countUserMessages(sessionManager: SessionManager, text: string): number {
@@ -547,7 +558,7 @@ test("mid-turn compaction boundary waits for the continuation run and returns it
     ],
     tools: [noopTool],
     autoCompaction: false,
-    extensions: [midTurnBoundaryExtension],
+    extensions: [midTurnBoundaryExtension()],
   });
   try {
     assert.equal(await harness.agent.run("do the task"), "answer after continuation");
@@ -582,7 +593,7 @@ test("a failing continuation run surfaces its own provider error", async () => {
     ],
     tools: [noopTool],
     autoCompaction: false,
-    extensions: [midTurnBoundaryExtension],
+    extensions: [midTurnBoundaryExtension()],
   });
   try {
     await assert.rejects(harness.agent.run("do the task"), /Subagent provider failed: continuation exploded/);
@@ -600,7 +611,7 @@ test("repeated mid-turn boundaries continue through every continuation run", asy
     ],
     tools: [noopTool],
     autoCompaction: false,
-    extensions: [midTurnBoundaryExtension],
+    extensions: [midTurnBoundaryExtension()],
   });
   try {
     assert.equal(await harness.agent.run("do the task"), "final after two boundaries");
@@ -633,7 +644,7 @@ test("a signal abort during the boundary wait aborts the subagent instead of han
     ],
     tools: [noopTool, holdTool],
     autoCompaction: false,
-    extensions: [midTurnBoundaryExtension],
+    extensions: [midTurnBoundaryExtension()],
   });
   const controller = new AbortController();
   const run = harness.agent.run("do the task", { signal: controller.signal });
@@ -671,30 +682,6 @@ test("an in-flight manual compaction at the boundary is awaited before the conti
       };
     });
   };
-  const manualBoundary: ExtensionFactory = (pi) => {
-    let followsTools = false;
-    let boundaryPending = false;
-    pi.on("turn_end", (event) => {
-      const results = (event as { toolResults?: unknown[] }).toolResults;
-      followsTools = Array.isArray(results) && results.length > 0;
-    });
-    pi.on("turn_start", (_event, ctx) => {
-      if (!followsTools) return;
-      followsTools = false;
-      boundaryPending = true;
-      ctx.abort();
-    });
-    pi.on("agent_settled", (_event, ctx) => {
-      if (!boundaryPending) return;
-      boundaryPending = false;
-      // Fire-and-forget manual compaction (0020's fallback when Pi did not
-      // compact): the continuation is queued only when it completes.
-      ctx.compact({
-        onComplete: () => pi.sendUserMessage(MID_TURN_CONTINUE_PROMPT),
-        onError: () => pi.sendUserMessage(MID_TURN_CONTINUE_PROMPT),
-      });
-    });
-  };
   const harness = await createAgentHarness({
     contextWindow: 100,
     settings: { compaction: { enabled: false, reserveTokens: 10, keepRecentTokens: 1 } },
@@ -704,13 +691,11 @@ test("an in-flight manual compaction at the boundary is awaited before the conti
     ],
     tools: [noopTool],
     autoCompaction: false,
-    extensions: [manualBoundary, serverCompaction],
+    extensions: [midTurnBoundaryExtension({ resumeViaManualCompact: true }), serverCompaction],
     seed: (sessionManager, model) => seedCompactableSession(sessionManager, model),
   });
   try {
-    const manualResult = await harness.agent.run("do the task");
-    console.error("MANUAL-TEST RESULT:", JSON.stringify(manualResult));
-    assert.equal(manualResult, "answer after manual compaction");
+    assert.equal(await harness.agent.run("do the task"), "answer after manual compaction");
     assert.equal(countUserMessages(harness.sessionManager, MID_TURN_CONTINUE_PROMPT), 1);
     assert.ok(harness.sessionManager.getEntries().some((entry) => entry.type === "compaction"));
   } finally {
