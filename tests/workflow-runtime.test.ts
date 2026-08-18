@@ -28,6 +28,32 @@ function tmpJournalDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "wf-journal-"));
 }
 
+test("default workflow journals create an idempotent project .gitignore rule", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "wf-ignore-"));
+  const script = `${META}\nreturn await agent("create ignore", { label: "ignore" })`;
+
+  await runWorkflow(script, { cwd, runId: "wf_ignore_1", agent: fakeRunner() });
+  const gitignorePath = path.join(cwd, ".gitignore");
+  assert.equal(fs.readFileSync(gitignorePath, "utf8"), ".pi-workflow-runs/\n");
+
+  await runWorkflow(script, { cwd, runId: "wf_ignore_2", agent: fakeRunner() });
+  assert.equal(fs.readFileSync(gitignorePath, "utf8"), ".pi-workflow-runs/\n");
+});
+
+test("default workflow journals preserve existing .gitignore entries", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "wf-ignore-existing-"));
+  const gitignorePath = path.join(cwd, ".gitignore");
+  fs.writeFileSync(gitignorePath, "node_modules/");
+
+  await runWorkflow(`${META}\nreturn await agent("append ignore", { label: "ignore" })`, {
+    cwd,
+    runId: "wf_ignore_existing",
+    agent: fakeRunner(),
+  });
+
+  assert.equal(fs.readFileSync(gitignorePath, "utf8"), "node_modules/\n.pi-workflow-runs/\n");
+});
+
 test("sandbox hardening: injected globals expose no constructor escape hatch", async () => {
   const runner = fakeRunner();
   const result = await runWorkflow<Record<string, unknown>>(

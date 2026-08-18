@@ -101,7 +101,7 @@ The tool takes **exactly one** of three script sources:
 | `scriptPath` | Path to a workflow script file, e.g. one persisted by a previous invocation. UNC paths are rejected. |
 | `name` | A saved workflow from the registry. |
 
-Every invocation **persists its effective script** to `<cwd>/.pi-workflow-runs/<runId>/workflow.js` and reports the path in the tool result — to iterate on a workflow, edit that file and re-invoke with `{scriptPath}` (add `resumeFromRunId` to replay cached agents).
+Every invocation **persists its effective script** to `<cwd>/.pi-workflow-runs/<runId>/workflow.js` and reports the path in the tool result — to iterate on a workflow, edit that file and re-invoke with `{scriptPath}` (add `resumeFromRunId` to replay cached agents). When the default journal location is used, the first run also adds `.pi-workflow-runs/` to `<cwd>/.gitignore` while preserving existing rules; a custom `journalDir` does not modify project ignore rules.
 
 The saved-workflow registry merges three sources (project > user > built-in, alpha-sorted):
 

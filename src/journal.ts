@@ -32,6 +32,42 @@ interface CachedJournalEntry {
 
 const DEFAULT_RUNS_DIRNAME = ".pi-workflow-runs";
 const JOURNAL_FILENAME = "journal.jsonl";
+const WORKFLOW_RUNS_GITIGNORE_RULE = `${DEFAULT_RUNS_DIRNAME}/`;
+
+/** Return true for a root-level ignore rule that already covers workflow runs. */
+function hasWorkflowRunsIgnoreRule(content: string): boolean {
+  return content.split(/\r?\n/).some((line) => {
+    const rule = line.trim().replace(/^(?:\*\*\/|\/)/, "");
+    return rule === DEFAULT_RUNS_DIRNAME || rule === WORKFLOW_RUNS_GITIGNORE_RULE;
+  });
+}
+
+/**
+ * Keep generated workflow journals out of the project's Git working tree.
+ *
+ * This is deliberately best-effort: inability to read or update a project's
+ * `.gitignore` must never prevent a workflow from running. Existing rules are
+ * preserved, and repeated/concurrent workflow launches remain harmless.
+ */
+export function ensureWorkflowRunsGitignore(cwd: string): void {
+  const gitignorePath = path.join(cwd, ".gitignore");
+  let content = "";
+  try {
+    content = fs.readFileSync(gitignorePath, "utf8");
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+    if (code !== "ENOENT") return;
+  }
+
+  if (hasWorkflowRunsIgnoreRule(content)) return;
+
+  const separator = content.length > 0 && !content.endsWith("\n") ? "\n" : "";
+  try {
+    fs.appendFileSync(gitignorePath, `${separator}${WORKFLOW_RUNS_GITIGNORE_RULE}\n`);
+  } catch {
+    // Git hygiene is advisory; journal creation and execution remain primary.
+  }
+}
 
 /** Stable host-side hash. The determinism ban only applies inside the sandbox. */
 export function stableHash(input: string): string {
@@ -158,6 +194,7 @@ export class WorkflowJournal {
     const runDir = path.join(baseDir, options.runId);
     const journalPath = path.join(runDir, JOURNAL_FILENAME);
     fs.mkdirSync(runDir, { recursive: true });
+    if (options.journalDir === undefined) ensureWorkflowRunsGitignore(options.cwd);
 
     const journal = new WorkflowJournal(options.runId, runDir, journalPath);
     journal.replay();

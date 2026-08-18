@@ -18,7 +18,7 @@ import {
   type WorkflowAgentSnapshot,
   type WorkflowSnapshot,
 } from "./display.js";
-import { generateRunId, readJournalEntries } from "./journal.js";
+import { ensureWorkflowRunsGitignore, generateRunId, readJournalEntries } from "./journal.js";
 import {
   parseWorkflowScript,
   runWorkflow,
@@ -1333,6 +1333,7 @@ function persistScriptForRun(script: string, runId: string, cwd: string, journal
     const base = journalDir ?? path.join(cwd, ".pi-workflow-runs");
     const dir = path.join(base, runId);
     fs.mkdirSync(dir, { recursive: true });
+    if (journalDir === undefined) ensureWorkflowRunsGitignore(cwd);
     const file = path.join(dir, "workflow.js");
     fs.writeFileSync(file, script.endsWith("\n") ? script : `${script}\n`);
     return file;

@@ -24,6 +24,11 @@
   without a continuation, failing continuations, repeated boundaries, signal
   abort during the boundary wait, and the in-flight manual compaction path.
 
+### Changed
+- Default workflow journals now add `.pi-workflow-runs/` to the project's
+  `.gitignore` while preserving existing entries; custom journal directories do
+  not modify project ignore rules.
+
 ### Documentation
 - Pinned live Pi/TUI qualification to `openai-codex/gpt-5.6-luna` unless the owner explicitly requests another model; silent substitution with a smaller, cheaper, or similarly named model is not acceptable. Evidence must record the exact provider/model, thinking level, run ID, and retained parent session.
 
