@@ -3,6 +3,15 @@
 ## Unreleased
 
 ### Added
+- Script-level `opts.thinkingLevel` and agent-type frontmatter `thinking` /
+  `thinkingLevel` now override a subagent's thinking level (`off`, `minimal`,
+  `low`, `medium`, `high`, `xhigh`, `max`). Explicit opts win over the agent
+  type, which wins over the inherited parent session. Invalid values are logged
+  and ignored. Explicit `opts.thinkingLevel` is part of the journal cache key;
+  inherited parent thinking is not, so existing journals still replay.
+- Built-in `deep-research` and `code-review` pin every `agent()` call to
+  `thinkingLevel: 'high'`. Custom scripts still inherit the parent unless the
+  model sets `opts.thinkingLevel` on demand.
 - The live background progress widget now shows token, tool, and elapsed
   metrics for running subagents (same parenthetical as completed rows) and
   refreshes them on a 400ms timer from live session telemetry.
@@ -34,7 +43,7 @@
 
 ### Validated
 - Re-ran the 1.9.0 terminal-handoff scenario on Pi 0.84.2 with `openai-codex/gpt-5.6-luna` at minimal thinking. Parent and child both used the designated model, run `wf_01a6dc44-64b` completed, and the parent sequence remained `assistant(workflow call) → running tool result → workflow_result → assistant(final)` with no acknowledgement provider response.
-- Biome check, build, extension typecheck, and all 186 unit/integration tests pass.
+- Biome check, build, extension typecheck, and all 194 unit/integration tests pass.
 
 ## 1.9.0 - 2026-08-15
 

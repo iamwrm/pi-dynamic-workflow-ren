@@ -11,6 +11,7 @@ import path from "node:path";
  * name: code-reviewer
  * description: Thorough code reviewer
  * model: anthropic/claude-opus-4-5      # optional per-type model override
+ * thinking: high                        # optional per-type thinking level
  * tools: read, grep, find, ls           # optional tool allowlist
  * ---
  * You are a meticulous code reviewer. Focus on ...
@@ -26,6 +27,8 @@ export interface ResolvedAgentType {
   whenToUse?: string;
   /** Model reference resolved through the workflow's resolveModel hook. */
   model?: string;
+  /** Raw thinking override from frontmatter `thinking` / `thinkingLevel`. */
+  thinkingLevel?: string;
   /** Restrict the subagent's tools to these names. */
   toolNames?: string[];
   /** Role definition appended to the subagent's task instructions. */
@@ -114,6 +117,7 @@ export function parseAgentTypeFile(content: string, fallbackName: string): Resol
     ...(front.description ? { description: front.description } : {}),
     ...(front.whenToUse ? { whenToUse: front.whenToUse } : {}),
     ...(front.model ? { model: front.model } : {}),
+    ...(front.thinkingLevel || front.thinking ? { thinkingLevel: front.thinkingLevel || front.thinking } : {}),
     ...(toolNames && toolNames.length > 0 ? { toolNames } : {}),
     ...(systemPrompt ? { systemPrompt } : {}),
   };

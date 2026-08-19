@@ -79,12 +79,16 @@ export interface AgentKeyExtras {
   model?: string | null;
   agentType?: string | null;
   isolation?: string | null;
+  /** Explicit script `opts.thinkingLevel` only; inherited parent thinking is omitted. */
+  thinkingLevel?: string | null;
 }
 
 /**
  * Compute the deterministic agent key from its ordinal and call signature.
- * Calls without model/agentType/isolation keep the v1 signature so journals
- * written before those options were wired still replay for plain calls.
+ * Calls without model/agentType/isolation/thinkingLevel keep the v1 signature
+ * so journals written before those options were wired still replay for plain
+ * calls. `thinkingLevel` is added to the v2 object only when set, so existing
+ * model/agentType/isolation journals stay replayable.
  */
 export function agentKey(
   ordinal: number,
@@ -93,7 +97,8 @@ export function agentKey(
   schema: unknown,
   extras?: AgentKeyExtras,
 ): string {
-  const hasExtras = Boolean(extras && (extras.model || extras.agentType || extras.isolation));
+  const thinkingLevel = extras?.thinkingLevel ?? null;
+  const hasExtras = Boolean(extras && (extras.model || extras.agentType || extras.isolation || thinkingLevel));
   const signature = JSON.stringify(
     hasExtras
       ? {
@@ -104,6 +109,7 @@ export function agentKey(
           model: extras?.model ?? null,
           agentType: extras?.agentType ?? null,
           isolation: extras?.isolation ?? null,
+          ...(thinkingLevel ? { thinkingLevel } : {}),
         }
       : { v: 1, prompt, label: label ?? null, schema: schema ?? null },
   );

@@ -147,7 +147,7 @@ if (!question) {
 phase('Scope')
 const scope = await agent(
   'Decompose this research question into 3-6 complementary web-search angles (e.g. broad overview, academic/primary sources, recent news, contrarian/skeptic, practitioner experience — tuned to the domain; 5 angles is the target). Question: ' + question,
-  { label: 'scope question', phase: 'Scope', schema: SCOPE_SCHEMA },
+  { label: 'scope question', phase: 'Scope', schema: SCOPE_SCHEMA, thinkingLevel: 'high' },
 )
 if (!scope || !Array.isArray(scope.angles) || scope.angles.length === 0) {
   return { question, error: 'scoping failed: no search angles produced' }
@@ -166,7 +166,7 @@ const angleResults = await pipeline(
       'Web-search for sources answering: ' + angle.query
         + '\\nResearch angle: ' + angle.label + ' — ' + angle.rationale
         + '\\nUse a web search tool if available; otherwise use bash (e.g. curl a search engine or a known index/API). Return the top 4-6 most relevant result URLs with title, snippet, and relevance.',
-      { label: 'search: ' + angle.label, phase: 'Search', schema: SEARCH_SCHEMA },
+      { label: 'search: ' + angle.label, phase: 'Search', schema: SEARCH_SCHEMA, thinkingLevel: 'high' },
     )
     return { angle, results: found && Array.isArray(found.results) ? found.results : [] }
   },
@@ -188,7 +188,7 @@ const angleResults = await pipeline(
         + '\\nQuestion: ' + question
         + '\\nURL: ' + source.url + (source.title ? '\\nTitle: ' + source.title : '')
         + '\\nUse a web fetch tool if available; otherwise bash with curl -L. Extract 2-5 falsifiable claims with short supporting quotes, rate the source quality, and include the publish date if stated.',
-      { label: 'fetch: ' + source.url.replace(/^https?:\\/\\//, '').split('/')[0], phase: 'Fetch', schema: EXTRACT_SCHEMA },
+      { label: 'fetch: ' + source.url.replace(/^https?:\\/\\//, '').split('/')[0], phase: 'Fetch', schema: EXTRACT_SCHEMA, thinkingLevel: 'high' },
     )))
     const out = []
     for (let i = 0; i < novel.length; i++) {
@@ -239,7 +239,7 @@ const votes = await parallel(voteTasks.map((task) => () => agent(
     + '\\nClaim: ' + toVerify[task.claimIndex].claim
     + '\\nSource: ' + toVerify[task.claimIndex].url
     + (toVerify[task.claimIndex].quote ? '\\nQuote: ' + toVerify[task.claimIndex].quote : ''),
-  { label: 'verify ' + (task.claimIndex + 1) + '.' + (task.vote + 1), phase: 'Verify', schema: VERDICT_SCHEMA },
+  { label: 'verify ' + (task.claimIndex + 1) + '.' + (task.vote + 1), phase: 'Verify', schema: VERDICT_SCHEMA, thinkingLevel: 'high' },
 )))
 
 const survivors = []
@@ -272,7 +272,7 @@ const report = await agent(
     + '\\nQuestion: ' + question
     + '\\nVerified claims (JSON): ' + JSON.stringify(survivors)
     + '\\nRefuted claims (JSON, for caveats only): ' + JSON.stringify(killed.map((entry) => entry.claim)),
-  { label: 'synthesize report', phase: 'Synthesize', schema: REPORT_SCHEMA },
+  { label: 'synthesize report', phase: 'Synthesize', schema: REPORT_SCHEMA, thinkingLevel: 'high' },
 )
 if (!report) {
   return { question, summary: scope.summary, findings: survivors, refuted: killed.map((entry) => entry.claim), sources: [...seenUrls.keys()], stats, note: 'synthesis failed; returning raw confirmed claims' }
@@ -403,7 +403,7 @@ const scope = await agent(
   'Collect the change set under review: ' + effectiveTarget
     + '\\nUse git (via bash) and file reads from the repository at ' + cwd + '.'
     + '\\nResolve the target to a concrete diff (e.g. git diff for a range/working tree), list each changed file with a one-line change summary and a risk rating, and write a short overview of what the change does.',
-  { label: 'scope change set', phase: 'Scope', schema: SCOPE_SCHEMA },
+  { label: 'scope change set', phase: 'Scope', schema: SCOPE_SCHEMA, thinkingLevel: 'high' },
 )
 if (!scope || !Array.isArray(scope.files) || scope.files.length === 0) {
   return { target: effectiveTarget, error: 'scoping failed: no changed files found for the review target' }
@@ -419,7 +419,7 @@ const reviews = await parallel(DIMENSIONS.map((dimension) => () => agent(
     + '\\nOverview: ' + scope.overview
     + '\\nChanged files:\\n' + fileList
     + '\\nRepository: ' + cwd + '. Read the actual diff and surrounding code (bash + git, file reads); do not guess. Report at most 8 real findings for your dimension; an empty findings list is a valid answer.',
-  { label: 'review: ' + dimension.name, phase: 'Review', schema: FINDINGS_SCHEMA },
+  { label: 'review: ' + dimension.name, phase: 'Review', schema: FINDINGS_SCHEMA, thinkingLevel: 'high' },
 )))
 
 const allFindings = []
@@ -449,7 +449,7 @@ const votes = await parallel(voteTasks.map((task) => () => agent(
     + '\\nFinding (' + toVerify[task.findingIndex].severity + ', ' + toVerify[task.findingIndex].dimension + '): ' + toVerify[task.findingIndex].title
     + '\\nFile: ' + toVerify[task.findingIndex].file + (toVerify[task.findingIndex].location ? ' @ ' + toVerify[task.findingIndex].location : '')
     + '\\nDetail: ' + toVerify[task.findingIndex].detail,
-  { label: 'verify ' + (task.findingIndex + 1) + '.' + (task.vote + 1), phase: 'Verify', schema: VERDICT_SCHEMA },
+  { label: 'verify ' + (task.findingIndex + 1) + '.' + (task.vote + 1), phase: 'Verify', schema: VERDICT_SCHEMA, thinkingLevel: 'high' },
 )))
 
 const survivors = []
@@ -476,7 +476,7 @@ const report = await agent(
     + '\\nConfirmed findings (JSON): ' + JSON.stringify(survivors)
     + '\\nUnverified findings (JSON): ' + JSON.stringify(unverified)
     + '\\nRefuted findings (JSON, context only): ' + JSON.stringify(killed.map((finding) => finding.title)),
-  { label: 'synthesize review', phase: 'Synthesize', schema: REPORT_SCHEMA },
+  { label: 'synthesize review', phase: 'Synthesize', schema: REPORT_SCHEMA, thinkingLevel: 'high' },
 )
 const stats = { files: scope.files.length, findingsRaw: allFindings.length, findingsVerified: toVerify.length, confirmed: survivors.length, killed: killed.length, unverified: unverified.length }
 if (!report) {

@@ -40,6 +40,8 @@ export type { SessionViewOptions, SessionViewTarget } from "./session-view.js";
 export { SessionView } from "./session-view.js";
 export type { StructuredOutputCapture, StructuredOutputToolOptions } from "./structured-output.js";
 export { createStructuredOutputTool } from "./structured-output.js";
+export type { WorkflowThinkingLevel } from "./thinking-level.js";
+export { parseThinkingLevel, THINKING_LEVELS, thinkingLevelKey } from "./thinking-level.js";
 export type {
   AgentOptions,
   WorkflowAgentFeed,

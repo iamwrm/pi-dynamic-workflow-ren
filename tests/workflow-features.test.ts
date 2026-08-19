@@ -7,6 +7,7 @@ import test from "node:test";
 import { loadAgentTypes, parseAgentTypeFile } from "../src/agent-types.js";
 import { BUILTIN_WORKFLOWS, CODE_REVIEW_WORKFLOW, DEEP_RESEARCH_WORKFLOW } from "../src/builtin-workflows.js";
 import { agentKey } from "../src/journal.js";
+import { parseThinkingLevel, thinkingLevelKey } from "../src/thinking-level.js";
 import { MAX_SCRIPT_BYTES, parseWorkflowScript, runWorkflow } from "../src/workflow.js";
 import { findWorkflow, loadWorkflowRegistry } from "../src/workflow-registry.js";
 import { createWorkflowTool } from "../src/workflow-tool.js";
@@ -154,6 +155,52 @@ test("opts.agentType resolves a named definition: role prompt, tool allowlist, a
   assert.equal(seen.model, sentinelModel, "the agentType's model resolves when no explicit model is given");
 });
 
+test("opts.thinkingLevel is passed to the runner and wins over agentType thinking", async () => {
+  const runner = fakeRunner();
+  await runWorkflow(
+    `${META}\nreturn await agent('think', { label: 'override', thinkingLevel: 'off', agentType: 'reviewer' })`,
+    {
+      agent: runner,
+      journalDir: tmpDir("wf-think-"),
+      resolveAgentType: (name) => (name === "reviewer" ? { name: "reviewer", thinkingLevel: "high" } : undefined),
+    },
+  );
+  assert.equal(runner.optionsSeen[0].thinkingLevel, "off");
+});
+
+test("agentType thinking is used when opts.thinkingLevel is omitted", async () => {
+  const runner = fakeRunner();
+  await runWorkflow(`${META}\nreturn await agent('think', { label: 'typed', agentType: 'reviewer' })`, {
+    agent: runner,
+    journalDir: tmpDir("wf-think-type-"),
+    resolveAgentType: (name) => (name === "reviewer" ? { name: "reviewer", thinkingLevel: "max" } : undefined),
+  });
+  assert.equal(runner.optionsSeen[0].thinkingLevel, "max");
+});
+
+test("invalid opts.thinkingLevel is logged and ignored; agentType thinking still applies", async () => {
+  const runner = fakeRunner();
+  const result = await runWorkflow(
+    `${META}\nreturn await agent('think', { label: 'bad', thinkingLevel: 'ultra', agentType: 'reviewer' })`,
+    {
+      agent: runner,
+      journalDir: tmpDir("wf-think-bad-"),
+      resolveAgentType: (name) => (name === "reviewer" ? { name: "reviewer", thinkingLevel: "low" } : undefined),
+    },
+  );
+  assert.equal(runner.optionsSeen[0].thinkingLevel, "low");
+  assert.ok(result.logs.some((line) => /thinkingLevel 'ultra' is not a valid Pi thinking level/.test(line)));
+});
+
+test("plain agent() does not pass thinkingLevel so the runner inherits the session", async () => {
+  const runner = fakeRunner();
+  await runWorkflow(`${META}\nreturn await agent('plain', { label: 'plain' })`, {
+    agent: runner,
+    journalDir: tmpDir("wf-think-plain-"),
+  });
+  assert.equal(runner.optionsSeen[0].thinkingLevel, undefined);
+});
+
 test("opts.agentType falls back to a logged prompt hint when unresolvable", async () => {
   const runner = fakeRunner();
   const result = await runWorkflow(`${META}\nreturn await agent('go', { label: 'x', agentType: 'ghost' })`, {
@@ -166,11 +213,35 @@ test("opts.agentType falls back to a logged prompt hint when unresolvable", asyn
 
 test("per-agent options change the journal cache key; plain calls keep the v1 key", () => {
   const plain = agentKey(1, "p", "l", null);
-  const plainWithEmptyExtras = agentKey(1, "p", "l", null, { model: null, agentType: null, isolation: null });
+  const plainWithEmptyExtras = agentKey(1, "p", "l", null, {
+    model: null,
+    agentType: null,
+    isolation: null,
+    thinkingLevel: null,
+  });
   assert.equal(plain, plainWithEmptyExtras, "absent extras must keep old journals replayable");
   assert.notEqual(plain, agentKey(1, "p", "l", null, { model: "m1" }));
   assert.notEqual(agentKey(1, "p", "l", null, { model: "m1" }), agentKey(1, "p", "l", null, { model: "m2" }));
   assert.notEqual(plain, agentKey(1, "p", "l", null, { isolation: "worktree" }));
+  const modelOnly = agentKey(1, "p", "l", null, { model: "m1" });
+  assert.equal(
+    modelOnly,
+    agentKey(1, "p", "l", null, { model: "m1", thinkingLevel: null }),
+    "model-only v2 keys must not change when thinking is absent",
+  );
+  assert.notEqual(plain, agentKey(1, "p", "l", null, { thinkingLevel: "high" }));
+  assert.notEqual(
+    agentKey(1, "p", "l", null, { thinkingLevel: "off" }),
+    agentKey(1, "p", "l", null, { thinkingLevel: "high" }),
+  );
+});
+
+test("parseThinkingLevel accepts Pi tokens and rejects junk", () => {
+  assert.equal(parseThinkingLevel("high"), "high");
+  assert.equal(parseThinkingLevel(" MAX "), "max");
+  assert.equal(parseThinkingLevel("ultra"), undefined);
+  assert.equal(parseThinkingLevel(""), undefined);
+  assert.equal(thinkingLevelKey(" High "), "high");
 });
 
 // ---------------------------------------------------------------------------
@@ -360,7 +431,16 @@ test("deep-research runs end-to-end against a fake runner (salvage path on unusa
     args: "What is the airspeed velocity of an unladen swallow?",
   });
   assert.equal(runner.calls, 1, "only the scope agent ran");
+  assert.equal(runner.optionsSeen[0].thinkingLevel, "high");
   assert.match(String((result.result as { error?: string }).error), /scoping failed/);
+});
+
+test("built-in workflows pin every agent() call to thinkingLevel high", () => {
+  for (const workflow of BUILTIN_WORKFLOWS) {
+    const calls = workflow.script.match(/\bagent\s*\(/g) ?? [];
+    const highs = workflow.script.match(/thinkingLevel:\s*'high'/g) ?? [];
+    assert.equal(highs.length, calls.length, `${workflow.name} must set thinkingLevel: 'high' on every agent() call`);
+  }
 });
 
 test("registry: built-ins present; project overrides user overrides built-in; diagnostics for invalid files", () => {
@@ -414,6 +494,7 @@ test("agent-type files parse frontmatter (name, model, tools) and body as role p
       "name: explorer",
       "description: Repo explorer",
       "model: fake/fast-model",
+      "thinking: high",
       "tools: read, grep, find",
       "---",
       "",
@@ -424,12 +505,18 @@ test("agent-type files parse frontmatter (name, model, tools) and body as role p
   assert.equal(parsed.name, "explorer");
   assert.equal(parsed.description, "Repo explorer");
   assert.equal(parsed.model, "fake/fast-model");
+  assert.equal(parsed.thinkingLevel, "high");
   assert.deepEqual(parsed.toolNames, ["read", "grep", "find"]);
   assert.equal(parsed.systemPrompt, "You explore repositories quickly.");
 
   const noFront = parseAgentTypeFile("Just a prompt body.", "stem-name");
   assert.equal(noFront.name, "stem-name");
   assert.equal(noFront.systemPrompt, "Just a prompt body.");
+
+  const viaLongKey = parseAgentTypeFile("---\nthinkingLevel: minimal\n---\nbody", "stem");
+  assert.equal(viaLongKey.thinkingLevel, "minimal");
+  const prefersLongKey = parseAgentTypeFile("---\nthinking: off\nthinkingLevel: max\n---\nbody", "stem");
+  assert.equal(prefersLongKey.thinkingLevel, "max");
 });
 
 test("agent-type registry: project definitions override user definitions by name", () => {

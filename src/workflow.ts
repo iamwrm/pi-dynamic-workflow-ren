@@ -17,6 +17,7 @@ import {
 } from "./agent.js";
 import type { ResolvedAgentType } from "./agent-types.js";
 import { agentKey, generateRunId, WorkflowJournal } from "./journal.js";
+import { parseThinkingLevel, thinkingLevelKey } from "./thinking-level.js";
 import { type WorktreeLease, WorktreeManager } from "./worktree.js";
 
 export interface WorkflowMetaPhase {
@@ -425,6 +426,8 @@ export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema |
   phase?: string;
   schema?: TSchemaDef;
   model?: string;
+  /** Per-call thinking override (off/minimal/low/medium/high/xhigh/max). */
+  thinkingLevel?: string;
   isolation?: "worktree";
   agentType?: string;
 }
@@ -635,10 +638,12 @@ export async function runWorkflow<T = unknown>(
     // that single-threaded, deterministic scripts produce stable ordinals across
     // replays, including inside parallel()/pipeline().
     const ordinal = ++state.ordinal;
+    const requestedThinkingKey = thinkingLevelKey(agentOptions.thinkingLevel);
     const key = agentKey(ordinal, prompt, agentOptions.label, agentOptions.schema ?? null, {
       model: agentOptions.model ?? null,
       agentType: agentOptions.agentType ?? null,
       isolation: agentOptions.isolation ?? null,
+      thinkingLevel: requestedThinkingKey ?? null,
     });
     throwIfAborted();
     const assignedPhase = agentOptions.phase ?? state.currentPhase;
@@ -707,11 +712,12 @@ export async function runWorkflow<T = unknown>(
       try {
         throwIfAborted();
 
-        // REAL per-agent option wiring (Claude Code parity): `model` resolves through
-        // the host model registry, `agentType` resolves a named subagent definition
-        // (role prompt + optional model/tool allowlist), and `isolation: 'worktree'`
-        // creates an actual detached git worktree. Unresolvable references degrade to
-        // the previous prompt-hint behavior with a log line.
+        // REAL per-agent option wiring: `model` resolves through the host model
+        // registry, `thinkingLevel` is a closed Pi token, `agentType` resolves a
+        // named subagent definition (role prompt + optional model/thinking/tool
+        // allowlist), and `isolation: 'worktree'` creates an actual detached git
+        // worktree. Unresolvable model/agentType references degrade to a prompt
+        // hint + log line; invalid thinking values are logged and ignored.
         let resolvedModel: Model<any> | undefined;
         if (agentOptions.model) {
           resolvedModel = options.resolveModel?.(agentOptions.model);
@@ -727,6 +733,20 @@ export async function runWorkflow<T = unknown>(
             if (!resolvedModel) {
               log(`agent ${label}: agentType model '${agentType.model}' not found; using the session model`);
             }
+          }
+        }
+        let resolvedThinking = parseThinkingLevel(agentOptions.thinkingLevel);
+        if (requestedThinkingKey && !resolvedThinking) {
+          log(
+            `agent ${label}: thinkingLevel '${agentOptions.thinkingLevel}' is not a valid Pi thinking level; ignoring it`,
+          );
+        }
+        if (!resolvedThinking && agentType?.thinkingLevel) {
+          resolvedThinking = parseThinkingLevel(agentType.thinkingLevel);
+          if (!resolvedThinking) {
+            log(
+              `agent ${label}: agentType thinking '${agentType.thinkingLevel}' is not a valid Pi thinking level; ignoring it`,
+            );
           }
         }
         if (agentOptions.isolation === "worktree") {
@@ -745,6 +765,7 @@ export async function runWorkflow<T = unknown>(
             modelResolved: Boolean(resolvedModel),
           }),
           ...(resolvedModel ? { model: resolvedModel } : {}),
+          ...(resolvedThinking ? { thinkingLevel: resolvedThinking } : {}),
           ...(worktree ? { cwd: worktree.cwd } : {}),
           ...(agentType?.toolNames?.length ? { toolNames: agentType.toolNames } : {}),
           onTelemetry(event: WorkflowAgentTelemetry) {
