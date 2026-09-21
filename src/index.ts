@@ -63,7 +63,9 @@ export type {
 export { findWorkflow, loadWorkflowRegistry, parseRunWorkflowInput } from "./workflow-registry.js";
 export type {
   WorkflowGuideOptions,
+  WorkflowTasksDetails,
   WorkflowTasksSource,
+  WorkflowToolDetails,
   WorkflowToolInput,
   WorkflowToolOptions,
 } from "./workflow-tool.js";

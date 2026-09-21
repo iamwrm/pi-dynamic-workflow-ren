@@ -395,6 +395,25 @@ test("/workflows command lists saved workflows (built-ins + project) via a workf
   assert.match(text, /proj-flow \[project\] — project workflow/);
   assert.match(text, /Live runs/);
   assert.match(text, /wf_recent123456/);
+
+  let customReads = 0;
+  await command.handler("", {
+    cwd,
+    mode: "tui",
+    hasUI: true,
+    ui: {
+      get custom() {
+        customReads++;
+        return async () => {
+          customCalls++;
+        };
+      },
+    },
+  });
+  assert.equal(customReads, 1, "call the current API without a legacy capability probe");
+  assert.equal(customCalls, 1);
+  assert.equal(sent.length, 1, "successful overlay does not send a fallback listing");
+  fs.rmSync(cwd, { recursive: true, force: true });
 });
 
 test("parseRunWorkflowInput resolves names and args against the registry", () => {
@@ -455,4 +474,39 @@ test("/run-workflow command notifies on empty input and unknown names without ex
   assert.equal(notifications.length, 2);
   assert.match(notifications[1].message, /Unknown workflow "does-not-exist"/);
   assert.equal(notifications[1].type, "error");
+});
+
+test("restored JSON details render completed snapshots and recover from running or malformed results", () => {
+  const tool = createWorkflowTool();
+  const render = tool.renderResult;
+  assert.ok(render);
+  const content = [{ type: "text" as const, text: "fallback result" }];
+  for (const details of [
+    { name: "running", status: "running", runId: "wf" },
+    { name: "broken", agents: null },
+    undefined,
+  ]) {
+    const component = render(
+      { content, details } as never,
+      { isPartial: false, expanded: false },
+      themeStub,
+      renderContextStub,
+    );
+    assert.match(component.render(80).join("\n"), /fallback result/);
+  }
+  const details = JSON.parse(
+    JSON.stringify({
+      name: "completed",
+      phases: [],
+      logs: [],
+      agents: [],
+      agentCount: 0,
+      runningCount: 0,
+      doneCount: 0,
+      errorCount: 0,
+      result: { ok: true },
+    }),
+  );
+  const component = render({ content, details }, { isPartial: false, expanded: true }, themeStub, renderContextStub);
+  assert.match(component.render(80).join("\n"), /completed/);
 });

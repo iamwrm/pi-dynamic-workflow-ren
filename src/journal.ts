@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { WorkflowAgentTelemetry } from "./agent.js";
+import { workflowJson } from "./json.js";
 
 /**
  * Append-only JSONL journal backing resumable workflow runs.
@@ -235,22 +236,23 @@ export class WorkflowJournal {
   append(key: string, result: unknown, telemetry?: WorkflowAgentTelemetry): void {
     if (this.cache.has(key)) return;
     const cleanTelemetry = sanitizeTelemetry(telemetry);
-    this.cache.set(key, { result, telemetry: cleanTelemetry });
+    const cleanResult = workflowJson(result);
     const entry: JournalEntry = {
       key,
-      result,
+      result: cleanResult,
       ...(cleanTelemetry ? { telemetry: cleanTelemetry } : {}),
       ts: Date.now(),
     };
     let line = `${JSON.stringify(entry)}\n`;
     if (this.firstAppend) {
-      this.firstAppend = false;
       // If a prior run crashed mid-append, the file may end in a partial line
       // with no trailing newline. Prepend a newline so this entry starts on its
       // own line instead of gluing onto (and thereby corrupting) the torn tail.
       if (this.hasTornTail()) line = `\n${line}`;
     }
     fs.appendFileSync(this.journalPath, line);
+    this.firstAppend = false;
+    this.cache.set(key, { result: cleanResult, telemetry: cleanTelemetry });
   }
 
   /** Whether the journal file exists and does not end in a newline (torn tail). */

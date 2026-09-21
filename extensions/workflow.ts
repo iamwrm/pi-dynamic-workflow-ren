@@ -104,9 +104,7 @@ export default function extension(pi: ExtensionAPI) {
   });
 
   const workflowTool = createWorkflowTool({
-    // ExtensionContext (the tool-execute ctx) has no thinking-level accessor; only
-    // the `pi` ExtensionAPI exposes getThinkingLevel(). Close over `pi` so subagents
-    // can inherit the parent session's live thinking level.
+    // Read the parent's live thinking level at each child launch.
     getThinkingLevel: () => pi.getThinkingLevel(),
 
     // Compose the shutdown signal into each background run.
@@ -341,7 +339,7 @@ export default function extension(pi: ExtensionAPI) {
         }
       };
 
-      if (ctx.mode === "tui" && typeof ctx.ui.custom === "function") {
+      if (ctx.mode === "tui") {
         // Re-render on a timer while open so runningMs/feeds stay live. The timer
         // is cleared in finally (and self-defuses if the TUI is torn down — the
         // 0006-titlebar-spinner lesson).
@@ -372,7 +370,7 @@ export default function extension(pi: ExtensionAPI) {
           );
           return;
         } catch {
-          // Experimental overlay API unavailable or failed: use the text listing.
+          // Overlay construction/rendering failed: use the text listing.
         } finally {
           if (timer) clearInterval(timer);
         }
@@ -445,10 +443,10 @@ export default function extension(pi: ExtensionAPI) {
           params,
           shutdownController.signal,
           undefined,
-          ctx as unknown as Parameters<typeof workflowTool.execute>[4],
+          ctx,
         );
-        const text = workflowResultText(result.content as Array<{ type: string; text?: string }>);
-        const status = (result.details as { status?: string } | undefined)?.status;
+        const text = workflowResultText(result.content);
+        const status = result.details.status;
         if (status === "running") {
           // Backgrounded (interactive): completion is delivered via sendResult.
           ctx.ui.notify(text.split("\n")[0] || "Workflow started in background", "info");
@@ -460,7 +458,7 @@ export default function extension(pi: ExtensionAPI) {
             customType: "workflow_result",
             content: [{ type: "text", text }],
             display: true,
-            details: (result.details ?? {}) as Record<string, unknown>,
+            details: result.details,
           });
         }
       } catch (error) {

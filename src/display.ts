@@ -1,4 +1,5 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { JsonValue } from "@earendil-works/pi-ai";
+import type { AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { WorkflowAgentFeed, WorkflowAgentKillResult, WorkflowAgentSessionInfo, WorkflowMeta } from "./workflow.js";
 
@@ -34,7 +35,7 @@ export interface WorkflowSnapshot {
   doneCount: number;
   errorCount: number;
   durationMs?: number;
-  result?: unknown;
+  result?: JsonValue;
 }
 
 /**
@@ -148,7 +149,7 @@ export function createWidgetWorkflowDisplay(
 }
 
 export function createToolUpdateWorkflowDisplay(
-  onUpdate: ((result: { content: Array<{ type: "text"; text: string }>; details: unknown }) => void) | undefined,
+  onUpdate: AgentToolUpdateCallback<WorkflowSnapshot> | undefined,
   ctx?: Pick<ExtensionContext, "ui" | "hasUI">,
   options: WorkflowDisplayOptions & { streamToolUpdates?: boolean } = {},
 ): WorkflowDisplay {

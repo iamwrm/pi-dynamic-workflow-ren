@@ -52,11 +52,10 @@ false success marker.
 
 In the production-like Pi 0.80.6 probe used for this package, the first request
 fell from 5,857 input tokens with eager loading to 3,912 with the bootstrap: a
-1,945-token reduction before a workflow is used. Pi 0.80.7 introduced, and
-0.83.0 preserves, anchoring of purely additive activation at the loader result
-for provider-cache-friendly deferral on supported Anthropic and OpenAI Responses
-models; other providers still receive the complete active list on the following
-model turn.
+1,945-token reduction before a workflow is used. This is historical evidence,
+not a current token benchmark. On the required Pi 0.86.1 baseline, prompt/tool
+changes are persisted as ordered system-message deltas before the next request;
+providers without transition support receive a complete checkpoint.
 
 ## Usage
 
@@ -336,7 +335,7 @@ The `running` result is an explicit ownership handoff. Before it, the originatin
 
 While a background run is in flight, the interactive session shows a **live progress widget above the editor** plus a **compact footer status** (`<name>: <done>/<total> agents`), updated as phases and subagents progress. Each run owns a widget keyed per `runId`, so concurrent background runs do not clobber each other. When the result message is delivered, successful runs render the final completed workflow UI as a fixed `workflow_result` entry in the session history, then clear the transient widget/status; new messages can push it away, and you can scroll back to it later. Failed/aborted runs and session shutdown clear the transient UI. No live widget appears outside TUI mode.
 
-In non-TUI modes (`-p` / `--print` / `--mode json` / RPC / piped stdin) the tool runs in the **foreground** and returns the full result synchronously. RPC has `ctx.hasUI === true` in pi 0.80.6, so `ctx.mode` is the authoritative distinction. Foreground execution is required for correctness because these sessions may dispose before a detached continuation can deliver.
+In non-TUI modes (`-p` / `--print` / `--mode json` / RPC / piped stdin) the tool runs in the **foreground** and returns the full result synchronously. RPC has `ctx.hasUI === true`, so `ctx.mode` is the authoritative distinction. Foreground execution is required for correctness because these sessions may dispose before a detached continuation can deliver.
 
 ### Structured subagent output
 
@@ -381,7 +380,19 @@ launching parent turn
 
 Subagents run in fresh Pi sessions with the standard coding tools, inherited global/project packages and extensions, and the parent session's project-trust decision. When the parent has persisted session storage, each child is also persisted as a linked Pi session.
 
-Child sessions preserve Pi's persisted automatic-compaction setting (Pi defaults it to enabled). Overflow recovery remains active while a child is working; a successful terminal one-shot response skips threshold compaction because no later prompt would consume the summary. If inherited resources include the `ren-public-package` server-compaction extension, supported Codex and Fluxion models use its native server adapter; otherwise Pi uses its ordinary readable compactor. Every child attempt owns a separate offline `ModelRuntime`, so parallel server-compaction adapters cannot overwrite one another's request state.
+Child sessions preserve Pi's persisted automatic-compaction setting (Pi defaults it to enabled). Overflow recovery remains active while a child is working; a successful terminal one-shot response skips threshold compaction because no later prompt would consume the summary. If inherited resources include the `pi-openai-server-compaction` extension, supported Codex and Fluxion models use its native server adapter; otherwise Pi uses its ordinary readable compactor. Every child attempt owns a separate offline `ModelRuntime`, so parallel server-compaction adapters cannot overwrite one another's request state.
+
+Every attempt binds `session_start` and `resources_discover` once, then awaits
+SDK runtime shutdown in `finally`. Shutdown handlers drain inherited resources,
+including unified-exec processes and pending wakes. Telemetry and messages are
+captured just before invalidation. Provider workarounds remain inherited; only
+workflow recursion is filtered. Existing caller-supplied history is excluded
+from the attempt's usage, while new standalone usage of every kind is included.
+
+Workflow output must be JSON data. Objects with undefined members, non-finite
+numbers, cycles, functions, accessors or custom prototypes are rejected before
+journal/session persistence. An omitted final return is recorded as `null`.
+Existing journals are retained and their completed results still replay.
 
 Use the workflow tool's optional `autoCompaction` boolean or `WorkflowAgentOptions.autoCompaction` to override the persisted setting. SDK callers that inject `session.settingsManager` must also inject its paired, already-loaded `session.resourceLoader`; this prevents resource reload from erasing caller-owned in-memory overrides. Temporary CLI-only extensions are not inherited automatically.
 
@@ -431,7 +442,7 @@ This fork closes several Claude-Code-style gaps in the original prototype:
 - **Sandbox hardening.** Every injected callable (`agent`, `parallel`, `pipeline`, `log`, `phase`, the `console` methods, `process.cwd`) has its prototype/constructor stripped, closing the `injectedFn.constructor("return process")()` host-realm escape. Host intrinsics are no longer shared into the sandbox; the `vm` context uses its own fresh `JSON`/`Math`/`Array`/etc.
 - **CC-faithful timeouts.** `scriptTimeoutMs` (default 30s) bounds *only* the synchronous `vm` evaluation slice (matching Claude Code's internal sync-only `runInContext` timeout), so a `while (true) {}` cannot hang the host. There is no whole-run wall-clock deadline; instead activity-reset per-agent **stall detection** (180s, 5 retries — matching Claude Code) aborts and retries an individual stuck subagent and finally treats it as a normal failure (`null` + log), never killing the run.
 - **Runaway lifetime cap.** `maxAgents` (default 1000) caps total `agent()` spawns and throws a clear error when exceeded — the primary bound on `await agent()` runaways, alongside the abort signal and concurrency limiter.
-- **Terminal background handoff.** In TUI sessions a run executes in the background, returning a `runId` with `terminate: true` so the launch has no acknowledgement-only provider round. Accepted runs have workflow-owned cancellation independent of later parent turns. Completion waits for parent settlement and is serialized into one triggered turn per run (Claude Code's `<task-notification>`). In print/JSON/RPC modes the tool remains foreground and non-terminal so results are never lost. The mode check is intentional because RPC has `ctx.hasUI === true` in pi 0.80.6. In-flight background runs are cancelled and awaited on session shutdown.
+- **Terminal background handoff.** In TUI sessions a run executes in the background, returning a `runId` with `terminate: true` so the launch has no acknowledgement-only provider round. Accepted runs have workflow-owned cancellation independent of later parent turns. Completion waits for parent settlement and is serialized into one triggered turn per run (Claude Code's `<task-notification>`). In print/JSON/RPC modes the tool remains foreground and non-terminal so results are never lost. The mode check is intentional because RPC has `ctx.hasUI === true`. In-flight background runs are cancelled and awaited on session shutdown.
 - **Structured-output retry.** When a subagent has a schema but finishes without calling `structured_output`, it is re-prompted with a firm nudge up to N times (default 2) before failing. Exhausted Pi provider retries (`stopReason: "error"`), aborted/truncated turns, and empty terminal text are failures rather than journaled successes.
 - **Real parent-environment inheritance.** Subagents inherit the parent Pi session's `model`, `thinkingLevel`, project-trust decision, file-backed global/project package settings, and automatic-compaction preference. Child resource loading preserves trusted project providers/workarounds while suppressing all project resources for untrusted parents; only workflow-tool extensions are filtered as a recursion guard. Temporary CLI `-e` extensions and inline factories cannot be reconstructed from settings, so SDK callers needing those can inject a paired `WorkflowAgentOptions.session.settingsManager` + `resourceLoader`.
 - **Real per-agent option wiring.** Script-level `opts.model` resolves through the session's model registry; `opts.thinkingLevel` overrides that child's thinking level; `opts.agentType` resolves named agent definitions from `~/.pi/agent/agents` / `.pi/agents` (optional model/thinking/tools); `opts.isolation: 'worktree'` creates actual detached git worktrees (50-slot limiter, auto-cleanup of unchanged checkouts). Built-in workflows pin every subagent to `high`.
@@ -460,3 +471,22 @@ Known remaining gaps vs Claude Code 2.1.172: turn-wide shared token budget, thro
 ## License
 
 MIT
+
+### Pi 0.86.1 migration gates
+
+`npm test` runs the deterministic suite without paid model requests. For the
+optional cross-package process and actual CLI gates, point at a reviewed local
+unified-exec checkout without installing it into Pi:
+
+```bash
+PI_WORKFLOW_TMUX=1 PI_WORKFLOW_EXEC_EXTENSION=/absolute/path/pi-unified-exec/src/index.ts npm test
+```
+
+These gates use faux providers and temporary agent directories. They check
+success/error/abort/stall-retry cleanup and wake suppression. `PI_WORKFLOW_TMUX=1`
+also runs the actual interactive background handoff in an isolated tmux session;
+omit it when tmux is unavailable. The CLI fixture
+uses the private workaround's filename to guard provider-only inheritance; it
+does not implement or claim live Anthropic OAuth validation. Windows process
+ownership still needs its native host gates. The tmux test checks handoff,
+completion rendering and shutdown, not every inspector interaction.

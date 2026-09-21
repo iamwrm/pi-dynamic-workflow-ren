@@ -669,7 +669,7 @@ test("journal self-heals a torn tail left by a crashed run", () => {
 test("workflow tool exposes resumeFromRunId and replays a prior run journal", async () => {
   const journalDir = tmpJournalDir();
   const script = `${META}\nconst value = await agent('resume me', { label: 'resume-target' })\nreturn { value }`;
-  const fakeCtx = { cwd: process.cwd(), hasUI: false } as never;
+  const fakeCtx = { cwd: process.cwd(), mode: "print", isProjectTrusted: () => true, hasUI: false } as never;
 
   const runner1 = fakeRunner();
   const tool1 = createWorkflowTool({ cwd: process.cwd(), journalDir, agent: runner1 });
@@ -737,8 +737,9 @@ test("workflow tool: non-TUI modes await foreground even when RPC has UI", async
   // the result could be lost when the session disposes. RPC has hasUI=true in
   // pi 0.80.6, so mode — not hasUI — is the authoritative distinction.
   for (const [label, fakeCtx] of [
-    ["print", { cwd: process.cwd(), mode: "print", hasUI: false }],
-    ["rpc", { cwd: process.cwd(), mode: "rpc", hasUI: true }],
+    ["print", { cwd: process.cwd(), mode: "print", isProjectTrusted: () => true, hasUI: false }],
+    ["json", { cwd: process.cwd(), mode: "json", isProjectTrusted: () => true, hasUI: false }],
+    ["rpc", { cwd: process.cwd(), mode: "rpc", isProjectTrusted: () => true, hasUI: true }],
   ] as const) {
     let sendResultCalls = 0;
     const tool = createWorkflowTool({
@@ -790,7 +791,7 @@ test("workflow tool: TUI mode backgrounds, returns a runId immediately, and noti
   });
   const controller = new AbortController();
   controller.abort();
-  const fakeCtx = { cwd: process.cwd(), mode: "tui", hasUI: true } as never;
+  const fakeCtx = { cwd: process.cwd(), mode: "tui", isProjectTrusted: () => true, hasUI: true } as never;
 
   const immediate = await tool.execute(
     "bg-1",
@@ -838,7 +839,7 @@ test("workflow tool: background path does not push streaming onUpdate after the 
   });
   const controller = new AbortController();
   controller.abort();
-  const fakeCtx = { cwd: process.cwd(), mode: "tui", hasUI: true } as never;
+  const fakeCtx = { cwd: process.cwd(), mode: "tui", isProjectTrusted: () => true, hasUI: true } as never;
 
   let updateCalls = 0;
   const onUpdate = () => {
@@ -860,4 +861,30 @@ test("workflow tool: background path does not push streaming onUpdate after the 
   // Flush a couple of macrotasks so any stray detached callback would have landed.
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(updateCalls, callsAtReturn, "onUpdate must not fire after the immediate background result resolves");
+});
+
+test("throwing completion observers cannot double charge successful attempts or replay", async () => {
+  const journalDir = tmpJournalDir();
+  const telemetry: WorkflowAgentTelemetry = { tokens: 5, toolCalls: 1, elapsedMs: 1 };
+  let calls = 0;
+  const runner = {
+    run: async (_prompt: string, options?: { onTelemetry?: (event: WorkflowAgentTelemetry) => void }) => {
+      calls++;
+      options?.onTelemetry?.(telemetry);
+      options?.onTelemetry?.(telemetry);
+      return "ok";
+    },
+  };
+  const script = `${META}await agent('once'); return budget.spent()`;
+  const first = await runWorkflow(script, {
+    journalDir,
+    agent: runner,
+    onAgentEnd: () => {
+      throw new Error("observer");
+    },
+  });
+  assert.equal(first.spentTokens, 5);
+  const second = await runWorkflow(script, { journalDir, agent: runner, resumeFromRunId: first.runId });
+  assert.equal(second.spentTokens, 5);
+  assert.equal(calls, 1);
 });

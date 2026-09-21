@@ -89,7 +89,8 @@ function createExtensionHarness(
   const ctx = {
     cwd,
     mode: "rpc",
-    hasUI: false,
+    hasUI: true,
+    isProjectTrusted: () => true,
     waitForIdle: async () => {
       operationLog.push("waitForIdle");
     },

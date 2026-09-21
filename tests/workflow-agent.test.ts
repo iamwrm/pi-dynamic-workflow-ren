@@ -6,6 +6,7 @@ import test from "node:test";
 import type { AssistantMessage, Model, Usage } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/compat";
 import {
+  AgentSession,
   DefaultResourceLoader,
   type ExtensionFactory,
   ModelRuntime,
@@ -216,7 +217,7 @@ test("terminal provider errors reject instead of returning stale assistant text"
   }
 });
 
-test("telemetry includes compacted-away messages and compaction request usage", async () => {
+test("telemetry excludes pre-existing history when a caller reuses a session manager", async () => {
   const compactUsage = usage(50, 0.5);
   const harness = await createAgentHarness({
     responses: [fauxAssistantMessage("current answer")],
@@ -247,9 +248,9 @@ test("telemetry includes compacted-away messages and compaction request usage", 
       .filter((entry) => entry.type === "message" && entry.message.role === "assistant")
       .at(-1)?.message.usage;
     assert.ok(currentAssistantUsage);
-    assert.equal(telemetry.usage.totalTokens, 100 + 50 + currentAssistantUsage.totalTokens);
-    assert.equal(telemetry.usage.cost.total, 0.1 + 0.5 + currentAssistantUsage.cost.total);
-    assert.ok(telemetry.usage.totalTokens > currentAssistantUsage.totalTokens);
+    assert.equal(telemetry.usage.totalTokens, currentAssistantUsage.totalTokens);
+    assert.equal(telemetry.usage.cost.total, currentAssistantUsage.cost.total);
+    assert.equal(telemetry.usage.totalTokens, currentAssistantUsage.totalTokens);
   } finally {
     harness.cleanup();
   }
@@ -698,6 +699,133 @@ test("an in-flight manual compaction at the boundary is awaited before the conti
     assert.equal(await harness.agent.run("do the task"), "answer after manual compaction");
     assert.equal(countUserMessages(harness.sessionManager, MID_TURN_CONTINUE_PROMPT), 1);
     assert.ok(harness.sessionManager.getEntries().some((entry) => entry.type === "compaction"));
+  } finally {
+    harness.cleanup();
+  }
+});
+
+for (const scenario of ["success", "provider-error", "retry", "pre-abort", "bind-error", "nudge"] as const) {
+  test(`child startup, resource discovery and shutdown are balanced: ${scenario}`, async (t) => {
+    const lifecycle: string[] = [];
+    let snapshot: readonly unknown[] | undefined;
+    const originalDispose = AgentSession.prototype.dispose;
+    const dispose = t.mock.method(AgentSession.prototype, "dispose", function (this: AgentSession) {
+      assert.ok(snapshot, "snapshot captured before invalidation");
+      assert.equal(lifecycle.at(-1), "snapshot");
+      return originalDispose.call(this);
+    });
+    const capture: ExtensionFactory = (pi) => {
+      pi.on("session_start", (_event, ctx) => {
+        assert.equal(ctx.mode, "print");
+        assert.equal(ctx.hasUI, false);
+        lifecycle.push("start");
+      });
+      pi.on("resources_discover", () => {
+        lifecycle.push("resources");
+        return scenario === "bind-error" ? { promptPaths: ["/fake/prompt"] } : undefined;
+      });
+      pi.on("session_shutdown", () => {
+        lifecycle.push("shutdown");
+      });
+    };
+    const responses =
+      scenario === "provider-error"
+        ? [fauxAssistantMessage("", { stopReason: "error", errorMessage: "invalid_api_key" })]
+        : scenario === "retry"
+          ? [
+              fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+              fauxAssistantMessage("ok"),
+            ]
+          : scenario === "nudge"
+            ? [
+                fauxAssistantMessage("forgot the tool"),
+                fauxAssistantMessage(fauxToolCall("structured_output", { answer: "ok" }), { stopReason: "toolUse" }),
+              ]
+            : [fauxAssistantMessage("ok")];
+    const harness = await createAgentHarness({
+      responses,
+      extensions: [capture],
+      autoCompaction: false,
+      settings: { retry: { enabled: scenario === "retry", maxRetries: 1, baseDelayMs: 1 } },
+    });
+    if (scenario === "bind-error") {
+      // Exercise the resource-discovery failure after startup, not a provider error.
+      const loader = (harness.agent as any).sessionOptions.resourceLoader;
+      loader.extendResources = () => {
+        throw new Error("resource discovery failed");
+      };
+    }
+    const controller = new AbortController();
+    if (scenario === "pre-abort") controller.abort();
+    try {
+      const run = harness.agent.run("task", {
+        signal: controller.signal,
+        ...(scenario === "nudge" ? { schema: Type.Object({ answer: Type.String() }) } : {}),
+        onSessionEnd: (messages) => {
+          snapshot = messages;
+          lifecycle.push("snapshot");
+        },
+      });
+      if (["provider-error", "pre-abort", "bind-error"].includes(scenario)) await assert.rejects(run);
+      else assert.deepEqual(await run, scenario === "nudge" ? { answer: "ok" } : "ok");
+      assert.deepEqual(lifecycle, ["start", "resources", "shutdown", "snapshot"]);
+      assert.ok(Array.isArray(snapshot));
+      assert.equal(dispose.mock.callCount(), 1);
+      if (scenario === "retry" || scenario === "nudge") assert.equal(harness.faux.state.callCount, 2);
+    } finally {
+      harness.cleanup();
+    }
+  });
+}
+
+test("attempt telemetry counts all standalone usage kinds, tools and summaries exactly once", async () => {
+  const harness = await createAgentHarness({
+    responses: [fauxAssistantMessage("ok")],
+    autoCompaction: false,
+    extensions: [
+      (pi) => {
+        pi.on("before_agent_start", () => {
+          const sm = harness.sessionManager;
+          const kept = sm.appendMessage({ role: "user", content: "owned history", timestamp: 1 });
+          sm.appendMessage(assistant(harness.model, "compacted answer", 100));
+          sm.appendMessage({ role: "system", content: "policy", timestamp: 2 });
+          sm.appendUsage("cache_warm", "test", "one", usage(20));
+          sm.appendUsage("future_unknown_kind", "test", "two", usage(30));
+          sm.appendMessage({
+            role: "toolResult",
+            toolCallId: "nested",
+            toolName: "nested",
+            content: [],
+            isError: false,
+            timestamp: 3,
+            usage: usage(40),
+          });
+          sm.appendCompaction("summary", kept, 100, {}, true, usage(50));
+          sm.branchWithSummary(sm.getLeafId(), "branch", {}, true, usage(60));
+        });
+        pi.on("session_shutdown", () => {
+          harness.sessionManager.appendUsage("shutdown_overhead", "test", "three", usage(7));
+        });
+      },
+    ],
+  });
+  let telemetry: WorkflowAgentTelemetry | undefined;
+  try {
+    await harness.agent.run("task", {
+      onTelemetry: (value) => {
+        telemetry = value;
+      },
+    });
+    const response = harness.sessionManager
+      .getEntries()
+      .filter((entry) => entry.type === "message" && entry.message.role === "assistant")
+      .at(-1);
+    assert.ok(response);
+    assert.equal(response.type, "message");
+    const currentUsage = (response as any).message.usage;
+    assert.equal(telemetry?.tokens, 307 + currentUsage.totalTokens);
+    assert.ok(Math.abs((telemetry?.usage?.cost.total ?? 0) - (0.307 + currentUsage.cost.total)) < 1e-12);
+    assert.equal(telemetry?.toolCalls, 1);
   } finally {
     harness.cleanup();
   }

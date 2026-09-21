@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.12.0 - 2026-09-21
+
+- Call the current TUI overlay API directly; keep text recovery for actual overlay failures, not old-host probing.
+- Require Pi 0.86.1 or newer and lock Pi-family development dependencies to 0.86.1.
+- Bind each child's extensions and resource discovery once. Use the SDK runtime for awaited shutdown on success, provider errors, cancellation, structured-output nudges and stall retries. Capture telemetry and messages after resource shutdown but before session invalidation.
+- Count standalone usage entries of every kind alongside assistant, tool and summary usage. Charge only entries created by the current attempt when a caller supplies existing history. Keep retry and journal replay totals single-counted, including throwing completion observers.
+- Use current `ctx.mode` for TUI backgrounding, current context trust/thinking accessors, typed tool details and supported callback/renderer contracts. Recover safely when restoring incomplete result details.
+- Validate and copy arbitrary workflow/agent output before persistence. Reject cycles, non-finite numbers, undefined members, functions, accessors, proxies and non-JSON objects rather than silently losing data. An omitted final workflow return becomes `null`. Failed journal writes cannot populate replay cache.
+- Add deterministic lifecycle/accounting/JSON regressions plus opt-in local unified-exec integration covering real process cleanup and wake suppression on success, error, abort and stall retry. Offline actual Pi JSON and opt-in tmux TUI tests exercise parent loading, foreground/background handoff, child extension inheritance and shutdown. No paid provider calls.
+
 ## Unreleased
 
 ### Added

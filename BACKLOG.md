@@ -46,11 +46,14 @@ Apply pi's 50 KB / 2000-line output contract to workflow completion and
 `workflow_tasks`. Persist full data and return a bounded summary plus path;
 validate pagination/tail parameters and cap aggregate per-agent status output.
 
-### P2 — complete inherited extension lifecycle
+### Resolved in local 1.12.0 — inherited extension lifecycle
 
-If child sessions continue to claim extension inheritance, bind extensions so
-`session_start`/`resources_discover` run and dispose them through a runtime that
-emits `session_shutdown`. Otherwise narrow the documented inheritance contract.
+Pi 0.86.1 child attempts bind `session_start`/`resources_discover` once and await
+`AgentSessionRuntime.dispose()` in `finally`, emitting `session_shutdown` before
+invalidation. Deterministic success/error/abort/retry tests and opt-in real
+unified-exec cleanup/wake suppression pass. This closes child extension lifecycle
+balance, not the broader workflow cancellation-drain or VM security items above.
+Commit/release remains pending review.
 
 ### P2 — remaining hardening and correctness
 

@@ -539,7 +539,7 @@ test("agent-type registry: project definitions override user definitions by name
 
 test("workflow tool requires exactly one of script/scriptPath/name", async () => {
   const tool = createWorkflowTool({ cwd: process.cwd(), journalDir: tmpDir("wf-onesrc-") });
-  const fakeCtx = { cwd: process.cwd(), hasUI: false } as never;
+  const fakeCtx = { cwd: process.cwd(), mode: "print", isProjectTrusted: () => true, hasUI: false } as never;
   await assert.rejects(
     Promise.resolve().then(() => tool.prepareArguments?.({} as never)),
     /exactly one of `script`, `scriptPath`, or `name`/,
@@ -569,7 +569,7 @@ test("workflow tool persists inline scripts and supports {scriptPath} re-invocat
   const journalDir = tmpDir("wf-persist-");
   const cwd = tmpDir("wf-persist-cwd-");
   const script = `${META}\nconst value = await agent('persist me', { label: 'persist' })\nreturn { value }`;
-  const fakeCtx = { cwd, hasUI: false } as never;
+  const fakeCtx = { cwd, mode: "print", isProjectTrusted: () => true, hasUI: false } as never;
 
   const runner1 = fakeRunner();
   const tool1 = createWorkflowTool({ cwd, journalDir, agent: runner1 });
@@ -601,7 +601,7 @@ test("workflow tool persists inline scripts and supports {scriptPath} re-invocat
 test("workflow tool rejects UNC and unreadable scriptPath values", async () => {
   const cwd = tmpDir("wf-unc-");
   const tool = createWorkflowTool({ cwd, journalDir: tmpDir("wf-uncj-") });
-  const fakeCtx = { cwd, hasUI: false } as never;
+  const fakeCtx = { cwd, mode: "print", isProjectTrusted: () => true, hasUI: false } as never;
   await assert.rejects(
     tool.execute("unc-1", { scriptPath: "\\\\server\\share\\evil.js" }, undefined, undefined, fakeCtx),
     /UNC paths are not supported/,
@@ -622,7 +622,7 @@ test("workflow tool runs saved workflows by name (project registry) and persists
   );
   const runner = fakeRunner();
   const tool = createWorkflowTool({ cwd, journalDir, agent: runner });
-  const fakeCtx = { cwd, hasUI: false } as never;
+  const fakeCtx = { cwd, mode: "print", isProjectTrusted: () => true, hasUI: false } as never;
 
   const result = await tool.execute("named-1", { name: "hello-flow", args: "world" }, undefined, undefined, fakeCtx);
   assert.equal(runner.calls, 1);
@@ -640,7 +640,7 @@ test("workflow tool resolves built-in names out of the box", async () => {
   const cwd = tmpDir("wf-builtin-");
   const runner = fakeRunner();
   const tool = createWorkflowTool({ cwd, journalDir: tmpDir("wf-builtinj-"), agent: runner });
-  const fakeCtx = { cwd, hasUI: false } as never;
+  const fakeCtx = { cwd, mode: "print", isProjectTrusted: () => true, hasUI: false } as never;
   const result = await tool.execute(
     "builtin-1",
     { name: "deep-research", args: "why is the sky blue?" },

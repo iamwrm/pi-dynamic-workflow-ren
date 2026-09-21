@@ -89,7 +89,7 @@ test("background path drives a live progress widget, then fixes the final UI in 
     },
   });
 
-  const fakeCtx = { cwd: process.cwd(), hasUI: true, ui: rec.ui } as never;
+  const fakeCtx = { cwd: process.cwd(), mode: "tui", isProjectTrusted: () => true, hasUI: true, ui: rec.ui } as never;
 
   const immediate = await tool.execute(
     "bg-ui-1",
@@ -189,7 +189,7 @@ test("registered live snapshots poll changing subagent token usage before comple
     },
     sendResult: () => resolveDelivery(),
   });
-  const fakeCtx = { cwd: process.cwd(), hasUI: true, ui: rec.ui } as never;
+  const fakeCtx = { cwd: process.cwd(), mode: "tui", isProjectTrusted: () => true, hasUI: true, ui: rec.ui } as never;
 
   try {
     await tool.execute(
@@ -251,7 +251,7 @@ test("live widget shows running subagent token and elapsed metrics", async () =>
     liveRefreshMs: 20,
     sendResult: () => resolveDelivery(),
   });
-  const fakeCtx = { cwd: process.cwd(), hasUI: true, ui: rec.ui } as never;
+  const fakeCtx = { cwd: process.cwd(), mode: "tui", isProjectTrusted: () => true, hasUI: true, ui: rec.ui } as never;
 
   try {
     await tool.execute(
@@ -301,7 +301,7 @@ test("registered cleanup is idempotent after completion clears the widget", asyn
       resolveDelivery();
     },
   });
-  const fakeCtx = { cwd: process.cwd(), hasUI: true, ui: rec.ui } as never;
+  const fakeCtx = { cwd: process.cwd(), mode: "tui", isProjectTrusted: () => true, hasUI: true, ui: rec.ui } as never;
 
   const immediate = await tool.execute(
     "bg-cleanup-cleared",
@@ -345,7 +345,7 @@ test("a completed background run emits no notify toast (sendResult is the only c
       resolveDelivery();
     },
   });
-  const fakeCtx = { cwd: process.cwd(), hasUI: true, ui: rec.ui } as never;
+  const fakeCtx = { cwd: process.cwd(), mode: "tui", isProjectTrusted: () => true, hasUI: true, ui: rec.ui } as never;
 
   await tool.execute(
     "bg-no-notify",
@@ -383,7 +383,7 @@ test("a shutdown-driven abort suppresses the failure toast (no toast on a dying 
       resolveDelivery();
     },
   });
-  const fakeCtx = { cwd: process.cwd(), hasUI: true, ui: rec.ui } as never;
+  const fakeCtx = { cwd: process.cwd(), mode: "tui", isProjectTrusted: () => true, hasUI: true, ui: rec.ui } as never;
 
   await tool.execute(
     "bg-shutdown-abort",
@@ -430,7 +430,7 @@ test("the footer status distinguishes failed agents from completed ones", async 
       resolveDelivery();
     },
   });
-  const fakeCtx = { cwd: process.cwd(), hasUI: true, ui: rec.ui } as never;
+  const fakeCtx = { cwd: process.cwd(), mode: "tui", isProjectTrusted: () => true, hasUI: true, ui: rec.ui } as never;
 
   await tool.execute(
     "bg-footer-fail",
@@ -478,7 +478,7 @@ test("a thrown ctx.ui error does not break final delivery", async () => {
     },
   });
 
-  const fakeCtx = { cwd: process.cwd(), hasUI: true, ui: rec.ui } as never;
+  const fakeCtx = { cwd: process.cwd(), mode: "tui", isProjectTrusted: () => true, hasUI: true, ui: rec.ui } as never;
 
   const immediate = await tool.execute(
     "bg-ui-throw",
@@ -515,7 +515,7 @@ test("concurrent background runs own distinct widget keys and clear only their o
       if (--remaining === 0) resolveAll();
     },
   });
-  const fakeCtx = { cwd: process.cwd(), hasUI: true, ui: rec.ui } as never;
+  const fakeCtx = { cwd: process.cwd(), mode: "tui", isProjectTrusted: () => true, hasUI: true, ui: rec.ui } as never;
 
   const first = await tool.execute(
     "bg-a",

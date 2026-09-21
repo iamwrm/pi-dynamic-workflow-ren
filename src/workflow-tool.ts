@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { Model } from "@earendil-works/pi-ai";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { JsonValue, Model } from "@earendil-works/pi-ai";
+import type { AgentToolResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { defineTool, getAgentDir, keyText, type Theme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -19,6 +19,7 @@ import {
   type WorkflowSnapshot,
 } from "./display.js";
 import { ensureWorkflowRunsGitignore, generateRunId, readJournalEntries } from "./journal.js";
+import { workflowJson } from "./json.js";
 import {
   parseWorkflowScript,
   runWorkflow,
@@ -237,7 +238,18 @@ export interface WorkflowBackgroundResult {
   /** Text to surface to the model (a completion summary or an error message). */
   text: string;
   /** Structured details mirroring the foreground tool result's `details`. */
-  details: Record<string, unknown>;
+  details: WorkflowToolDetails;
+}
+
+export interface WorkflowToolDetails extends Partial<WorkflowSnapshot> {
+  runId?: string;
+  status?: "running" | "completed" | "failed" | "aborted";
+  error?: string;
+  scriptPath?: string;
+  meta?: WorkflowRunResult["meta"];
+  spentTokens?: number;
+  tokenUsage?: WorkflowRunResult["tokenUsage"];
+  result?: JsonValue;
 }
 
 export interface WorkflowToolOptions {
@@ -245,10 +257,8 @@ export interface WorkflowToolOptions {
   concurrency?: number;
   /**
    * Reads the parent session's current thinking level so subagents inherit it.
-   * The tool-execute ctx (ExtensionContext) has no thinking-level accessor; only
-   * the `pi` object (ExtensionAPI.getThinkingLevel()) does, so the extension
-   * entrypoint closes over `pi` and passes this in. Called at execute() time so
-   * it reflects mid-session changes.
+   * The extension may supply its accessor; otherwise ctx.thinkingLevel is used.
+   * Called at execute() time so it reflects mid-session changes.
    */
   getThinkingLevel?: () => import("@earendil-works/pi-agent-core").ThinkingLevel | undefined;
   /**
@@ -398,7 +408,9 @@ export function buildWorkflowGuide(options: WorkflowGuideOptions = {}): string {
   ].join("\n");
 }
 
-export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefinition<typeof workflowToolSchema, any> {
+export function createWorkflowTool(
+  options: WorkflowToolOptions = {},
+): ToolDefinition<typeof workflowToolSchema, WorkflowToolDetails> {
   let nextDeliveryId = 0;
   return defineTool({
     name: "workflow",
@@ -414,18 +426,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       return normalizeWorkflowToolArgs(args);
     },
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      // The tool-execute ctx is ExtensionContext, which exposes cwd/model/
-      // modelRegistry as PROPERTIES (no getModel()/getThinkingLevel() methods —
-      // those live on the `pi` ExtensionAPI object, not the execute ctx). Optional
-      // chaining keeps unit tests that pass a minimal fake ctx working.
-      const ctxAny = ctx as
-        | (typeof ctx & {
-            model?: unknown;
-            modelRegistry?: { getAll(): Array<Model<any>> };
-            isProjectTrusted?: () => boolean;
-          })
-        | undefined;
-      const cwd = options.cwd ?? ctxAny?.cwd ?? process.cwd();
+      const cwd = options.cwd ?? ctx.cwd;
       const agentDir = options.agentDir ?? safeAgentDir();
 
       // Named-workflow registry, shared by `name` resolution and the script-level
@@ -456,20 +457,18 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       // Persist subagent trajectories + token usage into the SAME pi session
       // storage as the parent session (child sessions linked via parentSession),
       // instead of only the run directory's capped messages.jsonl.
-      const sessionPersistence = resolveSessionPersistence(ctxAny?.sessionManager);
+      const sessionPersistence = resolveSessionPersistence(ctx.sessionManager);
 
       // Inherit the parent session's model so subagents run on the same model.
-      const inheritedModel = ctxAny?.model as Model<any> | undefined;
-      // Thinking level is read from the `pi` object via the injected accessor,
-      // since ExtensionContext has no thinking-level accessor at all.
-      const inheritedThinkingLevel = options.getThinkingLevel?.();
-      // Child sessions must inherit the parent's trust decision. Falling back to
-      // true preserves the standalone SDK behavior when no ExtensionContext exists.
-      const inheritedProjectTrusted = ctxAny?.isProjectTrusted?.() ?? true;
+      const inheritedModel = ctx.model;
+      // Capture thinking at launch, before the parent can switch it.
+      const inheritedThinkingLevel = options.getThinkingLevel?.() ?? ctx.thinkingLevel;
+      // Child sessions inherit the parent's trust decision without a permissive default.
+      const inheritedProjectTrusted = ctx.isProjectTrusted();
 
       // Script-level option resolvers (real wiring for opts.model / opts.agentType
       // and the workflow() nesting primitive). Test seams take precedence.
-      const resolveModel = options.resolveModel ?? ((ref: string) => resolveModelRef(ctxAny?.modelRegistry, ref));
+      const resolveModel = options.resolveModel ?? ((ref: string) => resolveModelRef(ctx.modelRegistry, ref));
       const agentTypeRegistry = options.resolveAgentType ? undefined : loadAgentTypes({ cwd, agentDir });
       const resolveAgentType =
         options.resolveAgentType ??
@@ -516,7 +515,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
         runSignal: AbortSignal | undefined,
         runId: string,
         resumeFromRunId?: string,
-      ): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown> }> => {
+      ): Promise<AgentToolResult<WorkflowToolDetails>> => {
         let result: WorkflowRunResult;
         try {
           result = await runWorkflow(script, {
@@ -605,7 +604,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
           );
         }
 
-        snapshot.result = result.result;
+        snapshot.result = workflowJson(result.result);
         snapshot.durationMs = result.durationMs;
         snapshot = recomputeWorkflowSnapshot(snapshot);
         if (liveStreaming) display.complete(snapshot);
@@ -623,7 +622,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
             meta: result.meta,
             phases: result.phases,
             logs: result.logs,
-            result: result.result,
+            result: snapshot.result,
             durationMs: result.durationMs,
             spentTokens: result.spentTokens,
             tokenUsage: result.tokenUsage,
@@ -636,12 +635,9 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       // BACKGROUND vs FOREGROUND (Claude Code runs workflows in the background and
       // returns a runId immediately). Backgrounding is only safe in the interactive
       // TUI and when the extension wired a sendResult delivery callback. RPC also has
-      // ctx.hasUI=true in pi 0.80.6, but its process/session may end before a detached
+      // ctx.hasUI=true, but its process/session may end before a detached
       // continuation can deliver, so print / JSON / RPC must await foreground.
-      const contextMode = (ctx as { mode?: string } | undefined)?.mode;
-      // The hasUI fallback keeps older SDK/minimal test contexts working; current
-      // pi always supplies mode, so RPC takes the explicit non-TUI branch above.
-      const interactiveTui = contextMode === "tui" || (contextMode === undefined && ctx?.hasUI === true);
+      const interactiveTui = ctx.mode === "tui";
       const canBackground = interactiveTui && typeof options.sendResult === "function";
 
       if (canBackground) {
@@ -703,7 +699,10 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
                 runId,
                 name: parsed.meta.name,
                 status,
-                text: finished.content[0]?.text ?? `Workflow ${parsed.meta.name} (runId ${runId}) completed.`,
+                text:
+                  finished.content[0]?.type === "text"
+                    ? finished.content[0].text
+                    : `Workflow ${parsed.meta.name} (runId ${runId}) completed.`,
                 details: { ...finished.details, status },
               });
             } catch {
@@ -811,7 +810,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       // whenever no interactive background delivery is wired.
       return runWorkflowToResult(signal, runId, params.resumeFromRunId);
     },
-    renderCall(args, theme, context?: { expanded?: boolean }) {
+    renderCall(args, theme, context) {
       // Show the generated workflow JS so the user can review it while the run
       // proceeds. This renders BEFORE renderResult and the live progress widget,
       // and persists in the transcript. Must be total: never throw.
@@ -851,14 +850,38 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       return new Text(theme.fg("toolTitle", theme.bold("workflow")), 0, 0);
     },
     renderResult(result, { isPartial }, theme) {
-      const snapshot = result.details as WorkflowSnapshot | undefined;
-      if (snapshot?.name) {
+      const snapshot = result.details;
+      if (isWorkflowSnapshot(snapshot)) {
         return new Text(renderWorkflowText(snapshot, !isPartial), 0, 0);
       }
       const text = result.content?.[0];
       return new Text(text?.type === "text" ? text.text : theme.fg("muted", "workflow"), 0, 0);
     },
   });
+}
+
+function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
+  if (!value || typeof value !== "object") return false;
+  const snapshot = value as Partial<WorkflowSnapshot>;
+  return (
+    typeof snapshot.name === "string" &&
+    [snapshot.agentCount, snapshot.runningCount, snapshot.doneCount, snapshot.errorCount].every(
+      (n) => typeof n === "number" && Number.isFinite(n),
+    ) &&
+    Array.isArray(snapshot.logs) &&
+    snapshot.logs.every((line) => typeof line === "string") &&
+    Array.isArray(snapshot.phases) &&
+    snapshot.phases.every((phase) => typeof phase === "string") &&
+    Array.isArray(snapshot.agents) &&
+    snapshot.agents.every(
+      (agent) =>
+        agent &&
+        typeof agent.id === "number" &&
+        typeof agent.label === "string" &&
+        typeof agent.prompt === "string" &&
+        ["queued", "running", "done", "error", "killed", "skipped"].includes(agent.status),
+    )
+  );
 }
 
 function normalizeWorkflowToolArgs(args: unknown): WorkflowToolInput {
@@ -1041,7 +1064,9 @@ type LiveRunEntry = ReturnType<WorkflowTasksSource["listRuns"]>[number];
  * model can count running agents, inspect any agent's status/runningMs by phase,
  * and kill a whole run or individual agents (ids from `status`).
  */
-export function createWorkflowTasksTool(source: WorkflowTasksSource): ToolDefinition<typeof workflowTasksSchema, any> {
+export function createWorkflowTasksTool(
+  source: WorkflowTasksSource,
+): ToolDefinition<typeof workflowTasksSchema, WorkflowTasksDetails> {
   return defineTool({
     name: "workflow_tasks",
     label: "Workflow tasks",
@@ -1054,17 +1079,19 @@ export function createWorkflowTasksTool(source: WorkflowTasksSource): ToolDefini
       );
       return {
         content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
-        details: payload as Record<string, unknown>,
+        details: payload,
       };
     },
   });
 }
 
+export type WorkflowTasksDetails = ReturnType<typeof workflowTasksPayload>;
+
 function workflowTasksPayload(
   runs: LiveRunEntry[],
   params: WorkflowTasksParams,
-  finishedRunStatus: (runId: string) => Record<string, unknown> | undefined = () => undefined,
-): Record<string, unknown> {
+  finishedRunStatus: (runId: string) => ReturnType<typeof finishedRunTranscripts> = () => undefined,
+) {
   const now = Date.now();
   if (params.action === "list") {
     return {
@@ -1115,7 +1142,7 @@ function workflowTasksPayload(
   };
 }
 
-type ResolvedLiveRun = { ok: true; run: LiveRunEntry } | { ok: false; error: Record<string, unknown> };
+type ResolvedLiveRun = { ok: true; run: LiveRunEntry } | { ok: false; error: { error: string; liveRunIds: string[] } };
 
 function resolveLiveRun(runs: LiveRunEntry[], runId?: string): ResolvedLiveRun {
   if (runId) {
@@ -1134,7 +1161,7 @@ function resolveLiveRun(runs: LiveRunEntry[], runId?: string): ResolvedLiveRun {
   };
 }
 
-function runSummary(run: LiveRunEntry, now: number): Record<string, unknown> {
+function runSummary(run: LiveRunEntry, now: number) {
   const snapshot = run.getSnapshot?.();
   const spentTokens = snapshot?.agents.reduce((sum, agent) => sum + (agent.tokens ?? 0), 0) ?? 0;
   return {
@@ -1161,9 +1188,9 @@ function groupAgentsByPhase(
   getFeed: (id: number) => WorkflowAgentFeed | undefined = () => undefined,
   feedTail = 0,
   getSession: (id: number) => WorkflowAgentSessionInfo | undefined = () => undefined,
-): Array<Record<string, unknown>> {
+) {
   const order: string[] = [];
-  const groups = new Map<string, Array<Record<string, unknown>>>();
+  const groups = new Map<string, Array<ReturnType<typeof agentStatusEntry>>>();
   for (const agent of snapshot.agents) {
     const phase = agent.phase ?? "(no phase)";
     if (!groups.has(phase)) {
@@ -1181,7 +1208,7 @@ function agentStatusEntry(
   feed?: WorkflowAgentFeed,
   feedTail = 0,
   session?: WorkflowAgentSessionInfo,
-): Record<string, unknown> {
+) {
   // Persisted pi child session for this agent: live handles report it first;
   // finished/replayed agents carry it in their telemetry-backed snapshot.
   const sessionPath = session?.sessionFile ?? agent.sessionFile;
@@ -1209,7 +1236,7 @@ function agentStatusEntry(
  * Post-mortem fallback for `status` on a finished run: report the persisted
  * per-agent transcript files from the run directory, when they exist.
  */
-function finishedRunTranscripts(source: WorkflowTasksSource, runId: string): Record<string, unknown> | undefined {
+function finishedRunTranscripts(source: WorkflowTasksSource, runId: string) {
   const baseDir = source.runsDir?.();
   if (!baseDir) return undefined;
   const agentsDir = path.join(baseDir, runId, "agents");

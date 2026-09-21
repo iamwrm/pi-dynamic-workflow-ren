@@ -544,7 +544,7 @@ test("background run: registerLiveUi exposes kill controls; killRun aborts only 
     { script: `${META}\nawait agent('hang forever')\nreturn 1` } as never,
     new AbortController().signal,
     undefined,
-    { cwd: process.cwd(), hasUI: true } as never,
+    { cwd: process.cwd(), mode: "tui", isProjectTrusted: () => true, hasUI: true } as never,
   );
   assert.equal((immediate.details as { status?: string }).status, "running");
   assert.ok(liveUi?.killRun, "registerLiveUi must expose killRun");
@@ -578,7 +578,7 @@ test("failed background handoff aborts the unowned run without delivering a deta
       { script: `${META}\nawait agent('hang forever')\nreturn 1` } as never,
       new AbortController().signal,
       undefined,
-      { cwd: process.cwd(), hasUI: true } as never,
+      { cwd: process.cwd(), mode: "tui", isProjectTrusted: () => true, hasUI: true } as never,
     ),
     /registry unavailable/,
   );
@@ -617,7 +617,7 @@ test("accepted background run survives its parent-turn abort and remains explici
     { script: `${META}\nawait agent('hang forever')\nreturn 1` } as never,
     origin.signal,
     undefined,
-    { cwd: process.cwd(), hasUI: true } as never,
+    { cwd: process.cwd(), mode: "tui", isProjectTrusted: () => true, hasUI: true } as never,
   );
   assert.equal((immediate.details as { status?: string }).status, "running");
   await waitFor(() => liveUi?.getSnapshot?.().agents[0]?.status === "running");
@@ -664,6 +664,8 @@ test("background run: killAgents kills one agent and the run still completes", a
 
   await tool.execute("bg-kill-agent", { script: PARALLEL_SCRIPT } as never, new AbortController().signal, undefined, {
     cwd: process.cwd(),
+    mode: "tui",
+    isProjectTrusted: () => true,
     hasUI: true,
   } as never);
 

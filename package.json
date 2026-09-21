@@ -1,6 +1,6 @@
 {
   "name": "pi-dynamic-workflow-rencc",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "description": "Claude-Code-style dynamic workflow orchestration for Pi, with resumable journaled runs, a runtime determinism shim, a hardened vm sandbox, and parent-session model/extension inheritance.",
   "type": "module",
   "private": true,
@@ -51,18 +51,18 @@
     "acorn": "^8.16.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-agent-core": ">=0.86.1",
+    "@earendil-works/pi-ai": ">=0.86.1",
+    "@earendil-works/pi-coding-agent": ">=0.86.1",
+    "@earendil-works/pi-tui": ">=0.86.1",
     "typebox": "*"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.16",
-    "@earendil-works/pi-agent-core": "^0.84.1",
-    "@earendil-works/pi-ai": "^0.84.1",
-    "@earendil-works/pi-coding-agent": "^0.84.1",
-    "@earendil-works/pi-tui": "^0.84.1",
+    "@earendil-works/pi-agent-core": "0.86.1",
+    "@earendil-works/pi-ai": "0.86.1",
+    "@earendil-works/pi-coding-agent": "0.86.1",
+    "@earendil-works/pi-tui": "0.86.1",
     "tsx": "latest",
     "typebox": "latest",
     "typescript": "latest"

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
-import type { Model } from "@earendil-works/pi-ai";
+import type { JsonValue, Model } from "@earendil-works/pi-ai";
 import type { Node } from "acorn";
 import { parse } from "acorn";
 import type { TSchema } from "typebox";
@@ -17,6 +17,7 @@ import {
 } from "./agent.js";
 import type { ResolvedAgentType } from "./agent-types.js";
 import { agentKey, generateRunId, WorkflowJournal } from "./journal.js";
+import { workflowJson } from "./json.js";
 import { parseThinkingLevel, thinkingLevelKey } from "./thinking-level.js";
 import { type WorktreeLease, WorktreeManager } from "./worktree.js";
 
@@ -161,7 +162,7 @@ export interface WorkflowRunControls {
   getAgentSession(id: number): WorkflowAgentSessionInfo | undefined;
 }
 
-export interface WorkflowRunResult<T = unknown> {
+export interface WorkflowRunResult<T = JsonValue> {
   meta: WorkflowMeta;
   result: T;
   logs: string[];
@@ -461,7 +462,7 @@ type AnyNode = Node & { [key: string]: any; start: number; end: number };
 const DETERMINISM_ERROR =
   "Workflow scripts must be deterministic: Date()/Date.now()/Math.random()/new Date() are unavailable";
 
-export async function runWorkflow<T = unknown>(
+export async function runWorkflow<T = JsonValue>(
   script: string,
   options: WorkflowRunOptions = {},
 ): Promise<WorkflowRunResult<T>> {
@@ -847,7 +848,7 @@ export async function runWorkflow<T = unknown>(
           }
           if (!attempt) throw new Error("subagent attempt ended without an outcome");
           if (attempt.ok) {
-            result = attempt.result;
+            result = workflowJson(attempt.result);
             break;
           }
           if (attemptNo < stallRetries) {
@@ -866,7 +867,11 @@ export async function runWorkflow<T = unknown>(
         journal.append(key, result, finalTelemetry);
         recordTelemetry(state, finalTelemetry);
         feedState.finish(`done (${finalTelemetry.tokens ?? 0} tok, ${finalTelemetry.toolCalls} tools)`);
-        options.onAgentEnd?.({ id: ordinal, label, phase: assignedPhase, result, telemetry: finalTelemetry });
+        try {
+          options.onAgentEnd?.({ id: ordinal, label, phase: assignedPhase, result, telemetry: finalTelemetry });
+        } catch {
+          /* advisory callback must not charge a completed attempt twice */
+        }
         return result;
       } catch (error) {
         // A real whole-run abort (Esc) or the maxAgents fatal must propagate.
@@ -1105,7 +1110,8 @@ export async function runWorkflow<T = unknown>(
     : undefined;
 
   try {
-    const result = await runBody(context, body, `${meta.name || "workflow"}.js`);
+    const rawResult = await runBody(context, body, `${meta.name || "workflow"}.js`);
+    const result = workflowJson(rawResult === undefined ? null : rawResult);
     return {
       meta,
       result: result as T,

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Model, TextContent, Usage } from "@earendil-works/pi-ai";
 import {
+  AgentSessionRuntime,
   type CreateAgentSessionOptions,
   createAgentSession,
   createCodingTools,
@@ -480,6 +481,35 @@ export class WorkflowAgent {
       ...(thinkingLevel ? { thinkingLevel } : {}),
     });
 
+    // Children never replace their session. The SDK runtime owns shutdown and
+    // invalidation, including inherited extension resources.
+    const runtime = new AgentSessionRuntime(
+      session,
+      { cwd: sessionCwd, agentDir, modelRuntime, settingsManager, resourceLoader, diagnostics: [] },
+      async () => {
+        throw new Error("Workflow child sessions cannot be replaced");
+      },
+    );
+    const priorEntryIds = new Set(sessionManager.getEntries().map((entry) => entry.id));
+    const attemptEntries = () => sessionManager.getEntries().filter((entry) => !priorEntryIds.has(entry.id));
+    runtime.setBeforeSessionInvalidate(() => {
+      try {
+        const telemetry = collectTelemetry(attemptEntries(), Date.now() - started);
+        // Only report a session file that actually exists: the JSONL is flushed on
+        // the first assistant message, so an attempt that died earlier has none.
+        if (subagentSessionFile && existsSync(subagentSessionFile)) telemetry.sessionFile = subagentSessionFile;
+        options.onTelemetry?.(telemetry);
+      } catch {
+        // Telemetry is diagnostic/budget metadata; never let it change the subagent result.
+      }
+      try {
+        // Final message snapshot BEFORE dispose, so persistence sees a valid array.
+        options.onSessionEnd?.([...session.messages] as readonly unknown[]);
+      } catch {
+        // Advisory; never let persistence change the subagent result.
+      }
+    });
+
     let removeAbortListener: (() => void) | undefined;
     let unsubscribeSession: (() => void) | undefined;
     let terminalCompactionSuppressed = false;
@@ -538,16 +568,16 @@ export class WorkflowAgent {
       resolve?.();
     };
     try {
+      await session.bindExtensions({ mode: "print" });
       if (options.signal?.aborted) throw new Error("Subagent was aborted");
       try {
         // Effective metadata: explicit threading wins, then the session's own
         // resolved model/thinking level (covers callers relying on session defaults).
         const effectiveModel = model ?? session.model;
-        const effectiveThinking =
-          thinkingLevel ?? (session as { thinkingLevel?: ThinkingLevel | undefined }).thinkingLevel;
+        const effectiveThinking = thinkingLevel ?? session.thinkingLevel;
         options.onSessionHandle?.({
           getMessages: () => session.messages as readonly unknown[],
-          getTelemetry: () => collectTelemetry(sessionManager.getEntries(), Date.now() - started),
+          getTelemetry: () => collectTelemetry(attemptEntries(), Date.now() - started),
           ...(effectiveModel ? { model: `${effectiveModel.provider}/${effectiveModel.id}` } : {}),
           ...(effectiveThinking ? { thinkingLevel: String(effectiveThinking) } : {}),
           ...(subagentSessionFile ? { sessionFile: subagentSessionFile } : {}),
@@ -779,28 +809,25 @@ export class WorkflowAgent {
       if (!text.trim()) throw new Error("Subagent completed without a text response");
       return text as AgentRunResult<TSchemaDef>;
     } finally {
-      restoreTerminalCompaction();
-      // Release any pending boundary wait and its grace timer so neither can
-      // outlive the attempt (a stray timer would keep the process alive).
-      resolveBoundaryWait();
-      unsubscribeSession?.();
-      removeAbortListener?.();
+      // Ask active work to stop, but do not await a tool that needs its
+      // session_shutdown handler to release it. Runtime disposal drains owned
+      // extension resources before invalidating the session.
       try {
-        const telemetry = collectTelemetry(sessionManager.getEntries(), Date.now() - started);
-        // Only report a session file that actually exists: the JSONL is flushed on
-        // the first assistant message, so an attempt that died earlier has none.
-        if (subagentSessionFile && existsSync(subagentSessionFile)) telemetry.sessionFile = subagentSessionFile;
-        options.onTelemetry?.(telemetry);
-      } catch {
-        // Telemetry is diagnostic/budget metadata; never let it change the subagent result.
+        session.abortCompaction();
+        session.abortBranchSummary();
+        session.abort().catch(() => {});
+      } finally {
+        try {
+          restoreTerminalCompaction();
+          // Release any pending boundary wait and its grace timer so neither can
+          // outlive the attempt (a stray timer would keep the process alive).
+          resolveBoundaryWait();
+          unsubscribeSession?.();
+          removeAbortListener?.();
+        } finally {
+          await runtime.dispose();
+        }
       }
-      try {
-        // Final message snapshot BEFORE dispose, so persistence sees a valid array.
-        options.onSessionEnd?.([...session.messages] as readonly unknown[]);
-      } catch {
-        // Advisory; never let persistence change the subagent result.
-      }
-      session.dispose();
     }
   }
 
@@ -894,7 +921,7 @@ function sumUsage(entries: readonly SessionEntry[]): WorkflowAgentUsage | undefi
     if (entry.type === "message") {
       const message = entry.message as Partial<AssistantMessage> & { usage?: unknown };
       if (message.role === "assistant" || message.role === "toolResult") usage = message.usage;
-    } else if (entry.type === "compaction" || entry.type === "branch_summary") {
+    } else if (entry.type === "compaction" || entry.type === "branch_summary" || entry.type === "usage") {
       usage = entry.usage;
     }
     if (!isUsage(usage)) continue;
