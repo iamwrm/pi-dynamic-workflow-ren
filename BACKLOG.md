@@ -55,6 +55,15 @@ unified-exec cleanup/wake suppression pass. This closes child extension lifecycl
 balance, not the broader workflow cancellation-drain or VM security items above.
 Commit/release remains pending review.
 
+### Resolved in 1.12.1 — cancellation during deferred continuations
+
+The prompt wait observes cancellation even while Pi 0.87.0 awaits an
+`agent_settled` continuation. Runtime shutdown can therefore release owned
+tools before the workflow returns its abort error. All 217 tests pass on Pi
+0.86.1 and 0.87.0 with terminal and real unified-exec cleanup tests enabled.
+This does not close the broader cancellation-drain item or forcibly terminate
+arbitrary in-process tools that ignore abort and shutdown cleanup.
+
 ### P2 — remaining hardening and correctness
 
 - Use session `ctx.cwd` for finished-run lookup and completion.

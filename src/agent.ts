@@ -556,6 +556,7 @@ export class WorkflowAgent {
     // Set when any combined abort signal (stall, whole-run abort, manual kill)
     // fired, so a pending boundary wait cannot swallow an abort.
     let combinedAborted = false;
+    let rejectPromptWait: (() => void) | undefined;
     let boundaryWaitResolve: (() => void) | undefined;
     let boundaryGraceTimer: ReturnType<typeof setTimeout> | undefined;
     const resolveBoundaryWait = (): void => {
@@ -700,6 +701,7 @@ export class WorkflowAgent {
           if (abortStarted) return;
           abortStarted = true;
           combinedAborted = true;
+          rejectPromptWait?.();
           // A pending boundary wait must not outlive an abort: release it so
           // promptSession can re-check and surface the abort as a failure.
           resolveBoundaryWait();
@@ -733,9 +735,18 @@ export class WorkflowAgent {
 
       const promptSession = async (text: string): Promise<AssistantMessage> => {
         const priorEntryIds = new Set(sessionManager.getEntries().map((entry) => entry.id));
+        const aborted = new Promise<never>((_, reject) => {
+          rejectPromptWait = () => reject(new Error("Subagent was aborted"));
+        });
         try {
-          await session.prompt(text);
+          if (combinedAborted) throw new Error("Subagent was aborted");
+          // Pi 0.87 also awaits deferred agent_settled continuations inside
+          // prompt(). Cancellation must reach runtime shutdown even when a
+          // continuation tool needs that shutdown to release its resources.
+          // The race observes late prompt rejection without accepting its result.
+          await Promise.race([session.prompt(text), aborted]);
         } finally {
+          rejectPromptWait = undefined;
           restoreTerminalCompaction();
         }
         if (options.signal?.aborted) throw new Error("Subagent was aborted");

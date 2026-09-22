@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.12.1 - 2026-09-22
+
+- Make the child prompt wait cancellation-aware. Pi 0.87.0 awaits deferred `agent_settled` continuations inside `session.prompt()`, so a blocked continuation tool previously prevented workflow cancellation from reaching extension shutdown.
+- Preserve awaited runtime disposal and observe late prompt rejection without accepting late results. Cancellation still aborts Pi, compaction and branch summarization; tools that ignore abort and have no shutdown cleanup cannot be forcibly stopped in-process.
+- Replace the cancellation regression's startup sleep with a tool-start signal. Cover initial and continuation tools released by shutdown, late success/failure, manual compaction cancellation, single shutdown/snapshot ordering and abort-listener cleanup. Pi dependency pins remain 0.86.1; all 217 tests pass on both 0.86.1 and isolated 0.87.0 dependencies, including opt-in tmux and real unified-exec cleanup tests.
+
 ## 1.12.0 - 2026-09-21
 
 - Call the current TUI overlay API directly; keep text recovery for actual overlay failures, not old-host probing.

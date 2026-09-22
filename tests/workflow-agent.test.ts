@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +22,20 @@ let providerOrdinal = 0;
 
 function tmpDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+async function within<T>(promise: Promise<T>, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), 2000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function usage(totalTokens: number, cost = totalTokens / 1000): Usage {
@@ -624,6 +639,7 @@ test("repeated mid-turn boundaries continue through every continuation run", asy
 });
 
 test("a signal abort during the boundary wait aborts the subagent instead of hanging", async () => {
+  const started = Promise.withResolvers<void>();
   let releaseHold!: () => void;
   const holdReleased = new Promise<void>((resolve) => {
     releaseHold = resolve;
@@ -634,6 +650,7 @@ test("a signal abort during the boundary wait aborts the subagent instead of han
     description: "Pause until the test releases the tool",
     parameters: Type.Object({}),
     async execute() {
+      started.resolve();
       await holdReleased;
       return { content: [{ type: "text", text: "released" }], details: {} };
     },
@@ -650,15 +667,9 @@ test("a signal abort during the boundary wait aborts the subagent instead of han
   const controller = new AbortController();
   const run = harness.agent.run("do the task", { signal: controller.signal });
   try {
-    // Let the continuation run start and reach the blocking tool, then abort.
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await within(started.promise, "continuation tool did not start");
     controller.abort();
-    await Promise.race([
-      assert.rejects(run, /Subagent was aborted/),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("abort did not release the boundary wait")), 2000),
-      ),
-    ]);
+    await within(assert.rejects(run, /Subagent was aborted/), "abort did not release the boundary wait");
   } finally {
     releaseHold();
     controller.abort();
@@ -666,6 +677,73 @@ test("a signal abort during the boundary wait aborts the subagent instead of han
     harness.cleanup();
   }
 });
+
+for (const continuation of [false, true]) {
+  for (const lateFailure of [false, true]) {
+    test(`cancellation shuts down a blocked ${continuation ? "continuation" : "initial"} tool before snapshot: late ${lateFailure ? "failure" : "success"}`, async () => {
+      const started = Promise.withResolvers<void>();
+      const released = Promise.withResolvers<void>();
+      const finished = Promise.withResolvers<void>();
+      const lifecycle: string[] = [];
+      let toolSignal: AbortSignal | undefined;
+      const holdTool: ToolDefinition = {
+        name: "hold",
+        label: "Hold",
+        description: "Released by extension shutdown",
+        parameters: Type.Object({}),
+        async execute(_id, _args, signal) {
+          toolSignal = signal;
+          started.resolve();
+          await released.promise;
+          lifecycle.push("tool released");
+          finished.resolve();
+          if (lateFailure) throw new Error("late tool failure");
+          return { content: [{ type: "text", text: "late tool success" }], details: {} };
+        },
+      };
+      const cleanupExtension: ExtensionFactory = (pi) => {
+        pi.on("session_shutdown", async () => {
+          lifecycle.push("shutdown");
+          released.resolve();
+          await finished.promise;
+        });
+      };
+      const harness = await createAgentHarness({
+        responses: [
+          ...(continuation ? [fauxAssistantMessage(fauxToolCall("noop", {}), { stopReason: "toolUse" })] : []),
+          fauxAssistantMessage(fauxToolCall("hold", {}), { stopReason: "toolUse" }),
+        ],
+        tools: [noopTool, holdTool],
+        autoCompaction: false,
+        extensions: [...(continuation ? [midTurnBoundaryExtension()] : []), cleanupExtension],
+      });
+      const controller = new AbortController();
+      const run = harness.agent.run("do the task", {
+        signal: controller.signal,
+        onSessionEnd: () => lifecycle.push("snapshot"),
+      });
+      const rejected = assert.rejects(run, /Subagent was aborted/);
+      try {
+        await within(started.promise, "tool did not start");
+        controller.abort();
+        await within(rejected, "cancellation did not reach shutdown");
+        assert.equal(toolSignal?.aborted, true);
+        assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+        assert.deepEqual(lifecycle, ["shutdown", "tool released", "snapshot"]);
+        // Drain late tool/session continuations. Node's test runner also reports
+        // any unhandled rejection that escapes the cancelled prompt race.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(harness.faux.state.callCount, continuation ? 2 : 1);
+        assert.deepEqual(lifecycle, ["shutdown", "tool released", "snapshot"]);
+      } finally {
+        released.resolve();
+        controller.abort();
+        await rejected;
+        harness.cleanup();
+      }
+    });
+  }
+}
 
 test("an in-flight manual compaction at the boundary is awaited before the continuation", async () => {
   const serverUsage = usage(17, 0.17);
@@ -700,6 +778,74 @@ test("an in-flight manual compaction at the boundary is awaited before the conti
     assert.equal(countUserMessages(harness.sessionManager, MID_TURN_CONTINUE_PROMPT), 1);
     assert.ok(harness.sessionManager.getEntries().some((entry) => entry.type === "compaction"));
   } finally {
+    harness.cleanup();
+  }
+});
+
+test("cancellation aborts manual boundary compaction and awaits shutdown cleanup", async () => {
+  const started = Promise.withResolvers<void>();
+  const finished = Promise.withResolvers<void>();
+  const lifecycle: string[] = [];
+  let compactionSignal: AbortSignal | undefined;
+  const compactAtBoundary: ExtensionFactory = (pi) => {
+    let followsTools = false;
+    let pending = false;
+    pi.on("turn_end", (event) => {
+      followsTools = event.toolResults.length > 0;
+    });
+    pi.on("turn_start", (_event, ctx) => {
+      if (!followsTools) return;
+      followsTools = false;
+      pending = true;
+      ctx.abort();
+    });
+    pi.on("agent_settled", (_event, ctx) => {
+      if (!pending) return;
+      pending = false;
+      ctx.compact();
+    });
+    pi.on("session_before_compact", async (event) => {
+      compactionSignal = event.signal;
+      await new Promise<void>((resolve) => {
+        event.signal.addEventListener("abort", () => resolve(), { once: true });
+        if (event.signal.aborted) resolve();
+        started.resolve();
+      });
+      lifecycle.push("compaction aborted");
+      finished.resolve();
+      return { cancel: true };
+    });
+    pi.on("session_shutdown", async () => {
+      await finished.promise;
+      lifecycle.push("shutdown");
+    });
+  };
+  const harness = await createAgentHarness({
+    contextWindow: 100,
+    settings: { compaction: { enabled: false, reserveTokens: 10, keepRecentTokens: 1 } },
+    responses: [fauxAssistantMessage(fauxToolCall("noop", {}), { stopReason: "toolUse" })],
+    tools: [noopTool],
+    autoCompaction: false,
+    extensions: [compactAtBoundary],
+  });
+  const controller = new AbortController();
+  const run = harness.agent.run("do the task", {
+    signal: controller.signal,
+    onSessionEnd: () => lifecycle.push("snapshot"),
+  });
+  const rejected = assert.rejects(run, /Subagent was aborted/);
+  try {
+    await within(started.promise, "manual compaction did not start");
+    controller.abort();
+    await within(rejected, "abort did not release manual compaction");
+    assert.equal(compactionSignal?.aborted, true);
+    assert.deepEqual(lifecycle, ["compaction aborted", "shutdown", "snapshot"]);
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+    assert.equal(harness.faux.state.callCount, 1);
+  } finally {
+    controller.abort();
+    finished.resolve();
+    await rejected;
     harness.cleanup();
   }
 });
@@ -771,6 +917,7 @@ for (const scenario of ["success", "provider-error", "retry", "pre-abort", "bind
       assert.deepEqual(lifecycle, ["start", "resources", "shutdown", "snapshot"]);
       assert.ok(Array.isArray(snapshot));
       assert.equal(dispose.mock.callCount(), 1);
+      assert.equal(getEventListeners(controller.signal, "abort").length, 0);
       if (scenario === "retry" || scenario === "nudge") assert.equal(harness.faux.state.callCount, 2);
     } finally {
       harness.cleanup();
