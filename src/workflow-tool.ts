@@ -1,10 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { JsonValue, Model } from "@earendil-works/pi-ai";
-import type { AgentToolResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { defineTool, getAgentDir, keyText, type Theme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
+import { type Static, Type } from "typebox";
 import type { WorkflowAgent, WorkflowAgentSessionPersistence } from "./agent.js";
 import { loadAgentTypes, type ResolvedAgentType } from "./agent-types.js";
 import {
@@ -366,7 +366,7 @@ const WORKFLOW_TASKS_PROMPT_SUMMARY =
 
 export function buildWorkflowPromptGuidelines(options: WorkflowGuideOptions = {}): string[] {
   return [
-    "Use workflow when the user explicitly requests a workflow, fan-out, or multi-agent orchestration, or when a substantial task clearly benefits from independent investigations or perspectives followed by synthesis. Do not use it for ordinary single-agent work, conceptual questions, rewriting, or mere mentions of CI, business, or GitHub Actions workflows.",
+    "Use workflow when the user explicitly requests a workflow, saved workflow, multi-agent/subagent delegation, separate agents, or parallel fan-out/fan-in; or when a substantial task needs independent investigations or perspectives followed by synthesis, such as a multi-perspective review, competing-hypothesis analysis, or cross-functional dependency plan. Do not use it for ordinary single-agent work, conceptual questions, rewriting, or mere mentions of CI, business, or GitHub Actions workflows.",
     "For workflow, pass exactly one of script (raw JavaScript, no Markdown fences or prose), scriptPath (a saved script file), or name (a saved workflow).",
     "For workflow, every invocation persists its effective script to a file under .pi-workflow-runs/<runId>/ and returns the path; to iterate on a workflow, edit that file and re-invoke with {scriptPath: '<path>'} instead of resending the script - add resumeFromRunId to reuse cached agent results.",
     savedWorkflowsGuideline(options),
@@ -398,7 +398,7 @@ export const WORKFLOW_TASKS_PROMPT_GUIDELINES = [
 /** One cohesive, model-visible guide returned by workflow_load on demand. */
 export function buildWorkflowGuide(options: WorkflowGuideOptions = {}): string {
   return [
-    "Workflow orchestration guidance is loaded for this branch.",
+    "Workflow orchestration guidance is loaded for this branch. Loading is not permission: check workflow_status before drafting scripts or invoking workflow tools. Only the human can enable access with /workflow.enable.",
     "",
     `workflow: ${WORKFLOW_PROMPT_SUMMARY}`,
     ...buildWorkflowPromptGuidelines(options).map((line) => `- ${line}`),
@@ -408,9 +408,19 @@ export function buildWorkflowGuide(options: WorkflowGuideOptions = {}): string {
   ].join("\n");
 }
 
-export function createWorkflowTool(
-  options: WorkflowToolOptions = {},
-): ToolDefinition<typeof workflowToolSchema, WorkflowToolDetails> {
+// This tool uses only the common extension context, so the human command can
+// dispatch it directly without inventing nested-tool methods on its context.
+export type WorkflowToolDefinition = Omit<ToolDefinition<typeof workflowToolSchema, WorkflowToolDetails>, "execute"> & {
+  execute(
+    toolCallId: string,
+    params: Static<typeof workflowToolSchema>,
+    signal: AbortSignal | undefined,
+    onUpdate: AgentToolUpdateCallback<WorkflowToolDetails> | undefined,
+    ctx: ExtensionContext,
+  ): Promise<AgentToolResult<WorkflowToolDetails>>;
+};
+
+export function createWorkflowTool(options: WorkflowToolOptions = {}): WorkflowToolDefinition {
   let nextDeliveryId = 0;
   return defineTool({
     name: "workflow",
@@ -425,7 +435,7 @@ export function createWorkflowTool(
     prepareArguments(args) {
       return normalizeWorkflowToolArgs(args);
     },
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, onUpdate, ctx: ExtensionContext) {
       const cwd = options.cwd ?? ctx.cwd;
       const agentDir = options.agentDir ?? safeAgentDir();
 

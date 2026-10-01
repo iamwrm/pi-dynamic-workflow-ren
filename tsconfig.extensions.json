@@ -4,5 +4,5 @@
     "rootDir": ".",
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "extensions/**/*.ts", "tests/tool-json-contract.ts"]
+  "include": ["src/**/*.ts", "extensions/**/*.ts", "tests/tool-json-contract.ts", "tests/workflow-permission-*.test.ts"]
 }

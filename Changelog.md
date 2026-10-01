@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.13.1 - 2026-10-01
+
+- Shorten the two bootstrap descriptions from 1,027 to 352 characters combined. Keep status-before-drafting, human-only permission and broad delegation/synthesis discovery in the bootstrap; detailed selection examples remain in the loaded guide.
+- Omit the redundant access notice on an empty conversation. Existing conversations and unreadable projections still get a disabled reset notice. History navigation and compaction still reassert the live state; old notices are never rewritten or treated as consent.
+- Use short state notices on transitions. Explain accepted-run continuation and `/kill-workflow` only when live runs exist. Permission toggles still leave tool declarations, active tools and earlier request history unchanged.
+- Add footprint budgets and empty/resumed/compacted-history tests using the public session projection and actual offline Pi requests. Character measurements are not token estimates or provider cache-hit measurements; live-model discovery remains unqualified.
+
+## 1.13.0 - 2026-10-01
+
+- Default workflow access to disabled. Only human `/workflow.enable` and `/workflow.disable` commands change live-session permission; restart, reload, new, resume, and fork reset it. Loaded branch markers and old messages never grant permission.
+- Add always-available `workflow_status` with display label `workflow.status`, empty arguments, and structured `{ enabled, enableCommand }` output. Models check it before loading tools or drafting scripts. The check has no activation, registry, journal, or permission side effects.
+- Guard loader, workflow execution, live-task tools, nested codemode calls, and direct `/run-workflow` dispatch before side effects. Recheck direct dispatch after its idle wait. Accepted runs continue after disabling; human inspection/cancellation and completion delivery remain available.
+- Keep declarations and active tools unchanged across permission toggles. Append context-only state notices without starting or steering a model turn, including resets/history boundaries; repeated commands add no duplicates. Initial tool loading remains a separate intentional tool-set change.
+- Declare the workflow tool's actual common-context requirement so direct command dispatch typechecks on Pi 0.99.1 without inventing nested-tool methods. Existing Pi 0.99.1 dependency pins are retained.
+- Add model-free unit, SDK/codemode, JSON/RPC and regular/fullscreen tmux coverage for permission, stale status, lifecycle resets, in-flight revocation, tool-result ordering, and append-only request history. No live model adoption or provider cache-hit claim.
+
 ## 1.12.1 - 2026-09-22
 
 - Make the child prompt wait cancellation-aware. Pi 0.87.0 awaits deferred `agent_settled` continuations inside `session.prompt()`, so a blocked continuation tool previously prevented workflow cancellation from reaching extension shutdown.

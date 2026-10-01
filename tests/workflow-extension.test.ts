@@ -3,12 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import extension from "../extensions/workflow.js";
+import extension, { WORKFLOW_ACCESS_MESSAGE_TYPE, WORKFLOW_STATUS_TOOL_NAME } from "../extensions/workflow.js";
 
 type ToolSpec = {
   name: string;
   description: string;
   parameters: { properties?: Record<string, unknown> };
+  outputSchema?: unknown;
+  exposure?: string;
   promptSnippet?: string;
   promptGuidelines?: string[];
   executionMode?: string;
@@ -23,6 +25,7 @@ type ToolSpec = {
     content: Array<{ type: string; text?: string }>;
     details?: Record<string, unknown>;
     terminate?: boolean;
+    structuredContent?: unknown;
   }>;
 };
 
@@ -98,6 +101,17 @@ function createExtensionHarness(
       notify: (message: string, type?: string) => notifications.push({ message, type }),
     },
     sessionManager: {
+      buildSessionProjection: () => {
+        if (branchError) throw branchError;
+        return {
+          messages: branch.flatMap((entry) => {
+            if (entry.type === "message") return [entry.message];
+            if (entry.type === "custom_message") return [{ role: "custom", ...entry }];
+            if (entry.type === "compaction" || entry.type === "branch_summary") return [{ role: "user" }];
+            return [];
+          }),
+        };
+      },
       getBranch: () => {
         if (branchError) throw branchError;
         return branch;
@@ -142,6 +156,7 @@ function createExtensionHarness(
     sendMessage: (message: SentMessage["message"], sendOptions?: SentMessage["options"]) => {
       operationLog.push(`sendMessage:${message.customType ?? "unknown"}`);
       sentMessages.push({ message, options: sendOptions });
+      branch.push({ type: "custom_message", ...message });
     },
   } as never);
 
@@ -174,19 +189,33 @@ function createExtensionHarness(
       operationLog.length = 0;
     },
     async emit(event: string, payload: unknown) {
+      const results = [];
       for (const handler of handlers.get(event) ?? []) {
-        await handler(payload, ctx);
+        results.push(await handler(payload, ctx));
       }
+      return results;
     },
   };
 }
 
-test("fresh sessions expose only the small workflow loader and keep the full definitions metadata-free", async () => {
+async function enable(harness: ReturnType<typeof createExtensionHarness>): Promise<void> {
+  const command = harness.commands.get("workflow.enable");
+  assert.ok(command);
+  await command.handler("", harness.ctx);
+  harness.clearObservations();
+}
+
+test("fresh sessions expose only small workflow status/loading tools and keep definitions metadata-free", async () => {
   const harness = createExtensionHarness({
-    active: ["read", "workflow_load", "workflow", "workflow_tasks", "third_party"],
+    active: ["read", "workflow_status", "workflow_load", "workflow", "workflow_tasks", "third_party"],
   });
 
-  assert.deepEqual([...harness.tools.keys()].sort(), ["workflow", "workflow_load", "workflow_tasks"]);
+  assert.deepEqual([...harness.tools.keys()].sort(), [
+    "workflow",
+    "workflow_load",
+    "workflow_status",
+    "workflow_tasks",
+  ]);
   const loader = harness.tools.get("workflow_load");
   const workflow = harness.tools.get("workflow");
   const tasks = harness.tools.get("workflow_tasks");
@@ -198,7 +227,7 @@ test("fresh sessions expose only the small workflow loader and keep the full def
   assert.deepEqual(loader.parameters.properties ?? {}, {});
   assert.equal(loader.promptSnippet, undefined);
   assert.equal(loader.promptGuidelines, undefined);
-  assert.ok(loader.description.length <= 700, `loader description grew to ${loader.description.length} characters`);
+  assert.ok(loader.description.length <= 200, `loader description grew to ${loader.description.length} characters`);
   assert.match(loader.description, /multi-agent|multiple agents/i);
   assert.equal(workflow.promptSnippet, undefined);
   assert.equal(workflow.promptGuidelines, undefined);
@@ -206,8 +235,46 @@ test("fresh sessions expose only the small workflow loader and keep the full def
   assert.equal(tasks.promptGuidelines, undefined);
 
   await harness.emit("session_start", { type: "session_start", reason: "startup" });
-  assert.deepEqual(harness.active, ["read", "workflow_load", "third_party"]);
-  assert.deepEqual(harness.activeTransitions, [["read", "workflow_load", "third_party"]]);
+  assert.deepEqual(harness.active, ["read", "workflow_status", "workflow_load", "third_party"]);
+  assert.deepEqual(harness.activeTransitions, [["read", "workflow_status", "workflow_load", "third_party"]]);
+  assert.deepEqual(harness.sentMessages, [], "fresh startup needs no redundant access notice");
+});
+
+for (const branch of [
+  [],
+  [{ type: "custom", customType: "metadata", data: { enabled: true } }],
+  [{ type: "message", message: { role: "system" } }],
+]) {
+  test(`metadata-only startup skips access notices: ${JSON.stringify(branch)}`, async () => {
+    const harness = createExtensionHarness({ branch });
+    await harness.emit("session_start", { type: "session_start", reason: "startup" });
+    assert.deepEqual(harness.sentMessages, []);
+    assert.equal((await access(harness)).details?.enabled, false);
+  });
+}
+
+for (const entry of [
+  { type: "message", message: { role: "user", content: "existing conversation" } },
+  { type: "message", message: { role: "assistant", content: [] } },
+  { type: "custom_message", customType: WORKFLOW_ACCESS_MESSAGE_TYPE, details: { enabled: true } },
+  { type: "compaction", summary: "Earlier workflow access was enabled" },
+  { type: "branch_summary", summary: "Earlier workflow access was enabled" },
+]) {
+  test(`nonempty startup reasserts disabled state: ${entry.type}/${entry.customType ?? ""}`, async () => {
+    const harness = createExtensionHarness({ branch: [entry] });
+    await harness.emit("session_start", { type: "session_start", reason: "resume" });
+    assert.equal(harness.sentMessages.length, 1);
+    assert.equal(harness.sentMessages[0].message.content, "Workflow access disabled.");
+    assert.equal((await access(harness)).details?.enabled, false);
+  });
+}
+
+test("an unreadable projection keeps permission disabled and appends a reset notice", async () => {
+  const harness = createExtensionHarness();
+  harness.setBranchError(new Error("projection unavailable"));
+  await harness.emit("session_start", { type: "session_start", reason: "resume" });
+  assert.equal(harness.sentMessages[0]?.message.content, "Workflow access disabled.");
+  assert.equal((await access(harness)).details?.enabled, false);
 });
 
 test("lifecycle management does not override an explicit tool selection that omitted workflow_load", async () => {
@@ -224,7 +291,7 @@ test("workflow_load activates additively, returns a live catalog, and is idempot
     active: ["read", "workflow_load", "workflow", "workflow_tasks", "third_party"],
   });
   await harness.emit("session_start", { type: "session_start", reason: "startup" });
-  harness.clearObservations();
+  await enable(harness);
 
   const projectDir = path.join(cwd, ".pi", "workflows");
   fs.mkdirSync(projectDir, { recursive: true });
@@ -265,6 +332,7 @@ test("workflow_load reports CLI-filtered full tools as unavailable and does not 
   const loader = harness.tools.get("workflow_load");
   assert.ok(loader);
 
+  await enable(harness);
   const result = await loader.execute("load-filtered", {}, undefined, undefined, harness.ctx);
   assert.deepEqual(harness.active, ["read", "workflow_load"]);
   assert.match(toolResultText(result), /core workflow orchestration tool could not be loaded/i);
@@ -283,6 +351,7 @@ test("workflow_load keeps its guide and marker when only optional workflow_tasks
   const loader = harness.tools.get("workflow_load");
   assert.ok(loader);
 
+  await enable(harness);
   const result = await loader.execute("load-core-only", {}, undefined, undefined, harness.ctx);
   const text = toolResultText(result);
   assert.deepEqual(harness.active, ["read", "workflow_load", "workflow"]);
@@ -306,6 +375,7 @@ test("session_start and session_tree restore full tools only on branches contain
   await harness.emit("session_start", { type: "session_start", reason: "startup" });
   const loader = harness.tools.get("workflow_load");
   assert.ok(loader);
+  await enable(harness);
   await loader.execute("load", {}, undefined, undefined, harness.ctx);
   const marker = harness.branch.find(
     (entry) => entry.type === "custom" && /workflow|tools/.test(entry.customType ?? ""),
@@ -345,7 +415,7 @@ test("/run-workflow activates tools, injects the guide, prepares arguments, and 
     active: ["read", "workflow_load", "workflow", "workflow_tasks", "third_party"],
   });
   await harness.emit("session_start", { type: "session_start", reason: "startup" });
-  harness.clearObservations();
+  await enable(harness);
 
   const workflow = harness.tools.get("workflow");
   const command = harness.commands.get("run-workflow");
@@ -399,6 +469,7 @@ test("/run-workflow parse failures do not activate tools or add workflow context
   const command = harness.commands.get("run-workflow");
   assert.ok(command);
 
+  await enable(harness);
   await command.handler("does-not-exist target", harness.ctx);
   assert.deepEqual(harness.active, ["read", "workflow_load"]);
   assert.equal(harness.activeTransitions.length, 0);
@@ -412,7 +483,7 @@ test("a fast background result terminates launch, waits for settlement, and trig
   harness.ctx.mode = "tui";
   harness.ctx.hasUI = true;
   await harness.emit("session_start", { type: "session_start", reason: "startup" });
-  harness.clearObservations();
+  await enable(harness);
 
   // Model turn that launches the workflow is active. An already-aborted signal
   // makes the detached run complete immediately without invoking a real model.
@@ -434,6 +505,17 @@ test("a fast background result terminates launch, waits for settlement, and trig
 
   assert.equal(immediate.details?.status, "running");
   assert.equal(immediate.terminate, true);
+  await harness.commands.get("workflow.disable")?.handler("", harness.ctx);
+  assert.equal(
+    harness.sentMessages.find((entry) => entry.message.customType === WORKFLOW_ACCESS_MESSAGE_TYPE)?.message.content,
+    "Workflow access disabled. Accepted runs continue; /kill-workflow cancels a run.",
+  );
+  await assert.rejects(
+    harness.tools
+      .get("workflow_tasks")
+      ?.execute("disabled-poll", { action: "list" }, undefined, undefined, harness.ctx) ?? Promise.resolve(),
+    /WORKFLOW_DISABLED/,
+  );
   await waitFor(
     () => harness.notifications.some((entry) => /aborted/.test(entry.message)),
     "detached workflow did not settle",
@@ -454,4 +536,175 @@ test("a fast background result terminates launch, waits for settlement, and trig
   assert.equal(delivered[0].options?.triggerTurn, true);
 
   await harness.emit("session_shutdown", { type: "session_shutdown", reason: "test" });
+});
+
+async function access(harness: ReturnType<typeof createExtensionHarness>) {
+  const status = harness.tools.get(WORKFLOW_STATUS_TOOL_NAME);
+  assert.ok(status);
+  return status.execute("status", {}, undefined, undefined, harness.ctx);
+}
+
+test("workflow_status is small, structured, and side-effect-free while disabled or enabled", async () => {
+  const harness = createExtensionHarness({ active: ["workflow_status", "workflow_load"] });
+  const status = harness.tools.get(WORKFLOW_STATUS_TOOL_NAME);
+  assert.ok(status);
+  assert.deepEqual(status.parameters.properties, {});
+  assert.ok(status.outputSchema);
+  assert.equal(status.promptSnippet, undefined);
+  assert.equal(status.promptGuidelines, undefined);
+  assert.match(status.description, /before drafting or loading multi-agent workflows/);
+  assert.ok(status.description.length <= 160);
+  assert.deepEqual((await access(harness)).structuredContent, { enabled: false, enableCommand: "/workflow.enable" });
+  assert.equal(harness.operationLog.length, 0);
+  await enable(harness);
+  assert.deepEqual((await access(harness)).structuredContent, { enabled: true, enableCommand: "/workflow.enable" });
+  assert.equal(harness.operationLog.length, 0);
+  assert.deepEqual(harness.active, ["workflow_status", "workflow_load"]);
+});
+
+test("disabled execution rejects every workflow entry before reading context or writing files", async () => {
+  for (const active of [
+    ["workflow_status", "workflow_load"],
+    ["workflow", "workflow_tasks"],
+  ]) {
+    const harness = createExtensionHarness({ active });
+    await harness.emit("session_start", { type: "session_start", reason: "startup" });
+    harness.clearObservations();
+    const untouchedContext = {
+      get cwd() {
+        throw new Error("a disabled tool must not read execution context");
+      },
+    };
+    for (const [name, params] of [
+      ["workflow_load", {}],
+      ["workflow", { scriptPath: "/must-not-read.js" }],
+      ["workflow_tasks", { action: "kill", runId: "must-not-kill" }],
+    ] as const) {
+      const tool = harness.tools.get(name);
+      assert.ok(tool);
+      await assert.rejects(
+        tool.execute("blocked", params, undefined, undefined, untouchedContext),
+        /WORKFLOW_DISABLED/,
+      );
+    }
+    assert.deepEqual(harness.operationLog, []);
+    assert.deepEqual(fs.readdirSync(harness.ctx.cwd), []);
+    const command = harness.commands.get("run-workflow");
+    assert.ok(command);
+    await command.handler("does-not-exist", harness.ctx);
+    assert.match(harness.notifications[0]?.message ?? "", /WORKFLOW_DISABLED/);
+    assert.deepEqual(harness.operationLog, []);
+  }
+});
+
+test("tool_call blocks direct and nested workflow calls but never blocks status", async () => {
+  const harness = createExtensionHarness();
+  for (const toolName of ["workflow_load", "workflow", "workflow_tasks"]) {
+    for (const parentToolCallId of [undefined, "codemode-call"]) {
+      const results = await harness.emit("tool_call", { toolName, parentToolCallId, input: {} });
+      assert.deepEqual(results, [{ block: true, reason: results[0]?.reason }]);
+      assert.match(results[0]?.reason ?? "", /WORKFLOW_DISABLED/);
+    }
+  }
+  assert.deepEqual(await harness.emit("tool_call", { toolName: "workflow_status", input: {} }), [undefined]);
+  assert.deepEqual(await harness.emit("tool_call", { toolName: "read", input: {} }), [undefined]);
+  await enable(harness);
+  assert.deepEqual(await harness.emit("tool_call", { toolName: "workflow_load", input: {} }), [undefined]);
+});
+
+test("toggles do not change declarations or active tools, and repeated commands append no notices", async () => {
+  const harness = createExtensionHarness({ active: ["read", "workflow_status", "workflow_load", "third_party"] });
+  const declarations = () => JSON.stringify([...harness.tools.values()]);
+  const before = declarations();
+  const enableCommand = harness.commands.get("workflow.enable");
+  const disableCommand = harness.commands.get("workflow.disable");
+  assert.ok(enableCommand);
+  assert.ok(disableCommand);
+  await enableCommand.handler("", harness.ctx);
+  await enableCommand.handler("", harness.ctx);
+  await disableCommand.handler("", harness.ctx);
+  await disableCommand.handler("", harness.ctx);
+  assert.equal(declarations(), before);
+  assert.deepEqual(harness.activeTransitions, []);
+  assert.deepEqual(harness.active, ["read", "workflow_status", "workflow_load", "third_party"]);
+  assert.equal(harness.sentMessages.length, 2);
+  assert.deepEqual(
+    harness.sentMessages.map((entry) => entry.message.content),
+    ["Workflow access enabled for this session.", "Workflow access disabled."],
+  );
+  assert.ok(harness.sentMessages.every((entry) => entry.message.customType === WORKFLOW_ACCESS_MESSAGE_TYPE));
+  assert.ok(harness.sentMessages.every((entry) => entry.options?.triggerTurn === false));
+  assert.equal(harness.operationLog.includes("waitForIdle"), false, "revocation cannot wait for idle");
+  assert.deepEqual(harness.appendedEntries, [], "permission is not persisted as authorization");
+  await enableCommand.handler("true", harness.ctx);
+  assert.equal((await access(harness)).details?.enabled, false, "commands accept no alternate permission inputs");
+});
+
+test("loaded tools remain declared after disable and a stale enabled status cannot authorize execution", async () => {
+  const harness = createExtensionHarness({ active: ["workflow_status", "workflow_load"] });
+  await enable(harness);
+  const oldStatus = await access(harness);
+  const loader = harness.tools.get("workflow_load");
+  assert.ok(loader);
+  await loader.execute("load", {}, undefined, undefined, harness.ctx);
+  const active = harness.active;
+  harness.clearObservations();
+  await harness.commands.get("workflow.disable")?.handler("", harness.ctx);
+  assert.deepEqual(harness.active, active);
+  assert.deepEqual(harness.activeTransitions, []);
+  assert.equal(oldStatus.details?.enabled, true);
+  assert.equal((await access(harness)).details?.enabled, false);
+  await assert.rejects(loader.execute("stale", {}, undefined, undefined, harness.ctx), /WORKFLOW_DISABLED/);
+  assert.deepEqual(harness.appendedEntries, []);
+});
+
+for (const reason of ["startup", "reload", "new", "resume", "fork"]) {
+  test(`session_start ${reason} resets permission independently of loaded markers and old notices`, async () => {
+    const harness = createExtensionHarness({ active: ["workflow_status", "workflow_load"] });
+    await enable(harness);
+    await harness.tools.get("workflow_load")?.execute("load", {}, undefined, undefined, harness.ctx);
+    assert.equal((await access(harness)).details?.enabled, true);
+    harness.clearObservations();
+    await harness.emit("session_start", { type: "session_start", reason });
+    assert.equal((await access(harness)).details?.enabled, false);
+    assert.deepEqual(harness.active, ["workflow_status", "workflow_load", "workflow", "workflow_tasks"]);
+    assert.equal(harness.sentMessages.length, 1);
+    assert.equal((harness.sentMessages[0].message.details as { enabled: boolean }).enabled, false);
+  });
+}
+
+test("history navigation and compaction report live permission instead of restoring historical permission", async () => {
+  const harness = createExtensionHarness({ active: ["workflow_status", "workflow_load"] });
+  await enable(harness);
+  harness.replaceBranch([
+    { type: "custom_message", customType: WORKFLOW_ACCESS_MESSAGE_TYPE, details: { enabled: false } },
+  ]);
+  await harness.emit("session_tree", { type: "session_tree" });
+  assert.equal((await access(harness)).details?.enabled, true);
+  await harness.commands.get("workflow.disable")?.handler("", harness.ctx);
+  harness.replaceBranch([
+    { type: "custom_message", customType: WORKFLOW_ACCESS_MESSAGE_TYPE, details: { enabled: true } },
+  ]);
+  await harness.emit("session_tree", { type: "session_tree" });
+  assert.equal((await access(harness)).details?.enabled, false);
+  await harness.emit("session_compact", { type: "session_compact" });
+  assert.equal((harness.sentMessages.at(-1)?.message.details as { enabled: boolean }).enabled, false);
+  assert.ok(harness.sentMessages.every((entry) => entry.options?.triggerTurn === false));
+  assert.ok(harness.commands.has("workflows"));
+  assert.ok(harness.commands.has("kill-workflow"));
+});
+
+test("/run-workflow rechecks permission after waiting for idle", async () => {
+  const harness = createExtensionHarness({ active: ["workflow_status", "workflow_load"] });
+  await enable(harness);
+  harness.ctx.waitForIdle = async () => {
+    await harness.commands.get("workflow.disable")?.handler("", harness.ctx);
+  };
+  const command = harness.commands.get("run-workflow");
+  assert.ok(command);
+  await command.handler("code-review HEAD", harness.ctx);
+  assert.match(harness.notifications.at(-1)?.message ?? "", /WORKFLOW_DISABLED/);
+  assert.deepEqual(harness.activeTransitions, []);
+  assert.deepEqual(harness.appendedEntries, []);
+  assert.ok(harness.sentMessages.every((entry) => entry.message.customType === WORKFLOW_ACCESS_MESSAGE_TYPE));
 });

@@ -28,7 +28,59 @@ Then in Pi:
 /reload
 ```
 
-That's it. The extension registers the small `workflow_load` bootstrap plus the full `workflow` and `workflow_tasks` tools, along with `/workflows` (an interactive live-run inspector in the TUI) and `/run-workflow` / `/kill-workflow` commands. Only the bootstrap is active on a new branch; the full tools load on demand.
+The extension registers the small `workflow_status` and `workflow_load` tools plus the full `workflow` and `workflow_tasks` tools. Only status and loading are active on a new branch; the full tools load on demand. Workflow access starts disabled.
+
+### Human-controlled access
+
+```text
+/workflow.enable
+/workflow.disable
+```
+
+Only these human commands change permission. Both accept no arguments. Permission
+is local to the live session and resets to disabled on restart, reload, new
+session, resume, or fork. A request to use subagents does not enable access.
+Saved loaded-tool markers and old permission messages never grant permission.
+Tree navigation keeps the current runtime permission, not the old branch's
+permission; navigation and compaction append a current-state notice. Empty
+conversations need no startup notice because the bootstrap already says access
+is off by default. Existing conversations receive a disabled reset notice so
+older enabled messages cannot mislead the model. If the session projection is
+unreadable, the extension appends that notice conservatively.
+
+Before drafting workflow scripts or loading tools, the model calls
+`workflow_status {}`. Its display label is `workflow.status`; its provider-facing
+name uses an underscore for compatibility. It returns structured data:
+
+```json
+{ "enabled": false, "enableCommand": "/workflow.enable" }
+```
+
+This read-only tool remains callable while disabled and never loads tools or
+enables access. If disabled, continue single-agent rather than drafting scripts.
+Normal Pi tool filters still apply to it.
+
+While disabled, `workflow_load`, `workflow`, `workflow_tasks`, and
+`/run-workflow` fail before activation or execution side effects. The guard
+covers nested calls through codemode too. An earlier enabled status is not a
+permission token: execution always checks the current state.
+
+Disabling blocks further calls but does not cancel accepted workflows or suppress
+their results. Human `/workflows` inspection and `/kill-workflow` cancellation
+remain available. Notices say only `Workflow access disabled.` or
+`Workflow access enabled for this session.` The disabled notice mentions accepted
+runs and `/kill-workflow` only while runs are live. Repeated enable/disable
+commands append no duplicate notices.
+This is an execution policy for trusted extensions, not an OS security boundary;
+it does not sandbox the model's other tools or untrusted workflow scripts.
+
+Permission toggles do not change tool declarations, schemas, exposure, active
+tools, or system-prompt sections. State notices append to conversation history
+without starting a model turn. Full tools stay loaded after disabling. The
+separate first `workflow_load` call still changes the tool set and can invalidate
+provider caches that do not support incremental tool changes. Updating the
+extension's static declarations can also change the initial cached prefix;
+ordinary permission toggles do not.
 
 ### Progressive tool loading
 
@@ -37,7 +89,15 @@ That's it. The extension registers the small `workflow_load` bootstrap plus the 
 discover orchestration without putting the full tool schemas, saved-workflow
 catalog, or detailed guide into every session.
 
-When called, the loader additively activates `workflow` and `workflow_tasks`,
+The 1.13.1 bootstrap reduces the combined descriptions from 1,027 to 352
+characters. An isolated offline Pi 0.99.1 first-request capture reduced serialized
+workflow declarations from 1,542 to 867 characters and startup access notices
+from one to zero. These are character counts, not token estimates. Request-history
+tests check that permission toggles preserve earlier messages and declarations;
+no live-model discovery or provider cache-hit rate is claimed. Updating the
+extension itself changes its static prefix once.
+
+When called with human permission enabled, the loader additively activates `workflow` and `workflow_tasks`,
 returns their complete guide as one result, and reads the saved-workflow catalog
 at execution time. The tools remain loaded for that session branch; reload,
 resume, fork, and `/tree` navigation restore the state recorded on the selected
@@ -53,19 +113,21 @@ false success marker.
 In the production-like Pi 0.80.6 probe used for this package, the first request
 fell from 5,857 input tokens with eager loading to 3,912 with the bootstrap: a
 1,945-token reduction before a workflow is used. This is historical evidence,
-not a current token benchmark. On the required Pi 0.86.1 baseline, prompt/tool
+not a current token benchmark and predates the permission/status tool. On the
+required Pi 0.99.1 baseline, prompt/tool
 changes are persisted as ordered system-message deltas before the next request;
 providers without transition support receive a complete checkpoint.
 
 ## Usage
 
-Just ask Pi for a workflow in plain language:
+Enable access first, then ask Pi for a workflow in plain language:
 
 ```text
+/workflow.enable
 Run a workflow to inspect this repository and summarize the main modules.
 ```
 
-On an unloaded branch the model first calls `workflow_load`, then writes a workflow script and calls `workflow`. On an already loaded branch it can call `workflow` directly. The tool call shows the generated workflow script (the JS the model wrote) above the live progress, so you can review exactly what is running while the run proceeds; it persists in the transcript. Live progress then shows up inline:
+The model first checks `workflow_status`. When enabled, it calls `workflow_load` on an unloaded branch, then writes a workflow script and calls `workflow`. On an already loaded branch it can proceed without loading again, but still checks permission before drafting. The tool call shows the generated workflow script (the JS the model wrote) above the live progress, so you can review exactly what is running while the run proceeds; it persists in the transcript. Live progress then shows up inline:
 
 ```text
 ◆ Workflow: inspect_project (3/3 done)
@@ -116,6 +178,7 @@ Run `/workflows` to list saved workflows, live background runs (with progress), 
 /run-workflow <name> [args]
 ```
 
+Requires `/workflow.enable`; this command never grants permission implicitly.
 Runs a saved workflow immediately, without spending a model turn on dispatch: the
 command resolves `<name>` against the registry and invokes the workflow tool's
 execute path directly (same background run, live widget, and `workflow_result`
@@ -410,7 +473,7 @@ Use the workflow tool's optional `autoCompaction` boolean or `WorkflowAgentOptio
 | `src/agent.ts` | `WorkflowAgent`, an isolated Pi subagent runner (scoped settings/trust inheritance, text-return + structured contracts, activity events, per-call cwd/model/tools). |
 | `src/structured-output.ts` | Terminating structured-output tool backed by TypeBox/JSON Schema. |
 | `src/display.ts` | Workflow snapshots and compact text renderers. |
-| `extensions/workflow.ts` | The Pi extension entrypoint: `workflow_load`, additive activation and branch-local state, full-tool registration, commands, and result renderers. |
+| `extensions/workflow.ts` | The Pi extension entrypoint: `workflow_status`, human-only permission gate, `workflow_load`, additive activation and branch-local loaded state, commands, and result renderers. |
 
 ## Development
 
@@ -432,8 +495,9 @@ session with the evidence.
 
 This fork closes several Claude-Code-style gaps in the original prototype:
 
-- **Progressive disclosure.** New branches expose only the tiny `workflow_load`
-  bootstrap; the model loads the full tools, detailed guide, and current
+- **Human-controlled progressive disclosure.** New branches expose only tiny
+  status/loading tools, with access disabled. After `/workflow.enable`, the
+  model loads the full tools, detailed guide, and current
   saved-workflow catalog only when orchestration is useful. Loaded state follows
   the relevant session branch, and `/run-workflow` performs the same activation
   during model-free dispatch.

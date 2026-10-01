@@ -20,7 +20,9 @@ for (const mode of ["json", "tui"] as const) {
     const pidPath = path.join(root, "pid");
     const fixture = path.join(root, "0001-anthropic-oauth-cc-compat.ts");
     const workflowExtension = fileURLToPath(new URL("../extensions/workflow.ts", import.meta.url));
-    const cli = fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url));
+    const cli =
+      process.env.PI_WORKFLOW_CLI ??
+      fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url));
     const nodeScript = `require('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); setInterval(() => {}, 1000)`;
     const cmd = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(nodeScript)}`;
     const script =
@@ -98,6 +100,7 @@ export default function(pi) {
             "workflow-offline",
             "--model",
             "faux-1",
+            "/workflow.enable",
             "run test",
           ],
           {
@@ -138,7 +141,6 @@ export default function(pi) {
           "workflow-offline",
           "--model",
           "faux-1",
-          "run test",
         ];
         fs.writeFileSync(
           launch,
@@ -146,6 +148,19 @@ export default function(pi) {
         );
         const started = tmux("new-session", "-d", "-x", "100", "-y", "30", "-s", tmuxSession, `bash ${quote(launch)}`);
         assert.equal(started.status, 0, started.stderr);
+        await waitFor(() => jsonLines(lifecyclePath).some((row) => row.parent && row.event === "start"));
+        tmux("send-keys", "-t", tmuxSession, "-l", "/workflow.enable");
+        tmux("send-keys", "-t", tmuxSession, "Enter", "Enter");
+        // Pi defers the session file's first flush until an assistant response;
+        // observe command completion in the UI before the first model prompt.
+        await waitFor(() =>
+          /Workflow access enabled for this session/.test(tmux("capture-pane", "-p", "-t", tmuxSession).stdout),
+        );
+        tmux("send-keys", "-t", tmuxSession, "-l", "run test");
+        // A command persists its notice before the TUI finishes clearing its
+        // editor. Observe the next draft frame before submitting the prompt.
+        await waitFor(() => /run test/.test(tmux("capture-pane", "-p", "-t", tmuxSession).stdout));
+        tmux("send-keys", "-t", tmuxSession, "Enter");
         await waitFor(() =>
           jsonLines(parentFile).some(
             (row) =>

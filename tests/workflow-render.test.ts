@@ -464,6 +464,10 @@ test("/run-workflow command notifies on empty input and unknown names without ex
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "wf-runcmd-"));
   const notifications: Array<{ message: string; type?: string }> = [];
   const ctx = { cwd, ui: { notify: (message: string, type?: string) => notifications.push({ message, type }) } };
+  const enable = commands.get("workflow.enable");
+  assert.ok(enable);
+  await enable.handler("", ctx);
+  notifications.length = 0;
 
   await command.handler("", ctx);
   assert.equal(notifications.length, 1);

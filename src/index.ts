@@ -65,6 +65,7 @@ export type {
   WorkflowGuideOptions,
   WorkflowTasksDetails,
   WorkflowTasksSource,
+  WorkflowToolDefinition,
   WorkflowToolDetails,
   WorkflowToolInput,
   WorkflowToolOptions,

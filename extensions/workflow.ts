@@ -19,13 +19,20 @@ import {
 } from "../src/index.js";
 import { createWorkflowResultDeliveryCoordinator } from "../src/result-delivery.js";
 
+export const WORKFLOW_STATUS_TOOL_NAME = "workflow_status";
+export const WORKFLOW_ACCESS_MESSAGE_TYPE = "workflow_access";
 export const WORKFLOW_LOAD_TOOL_NAME = "workflow_load";
 export const WORKFLOW_TOOLS_LOADED_ENTRY = "pi-dynamic-workflow-rencc:tools-loaded";
 export const WORKFLOW_GUIDE_MESSAGE_TYPE = "workflow_guide";
 
 const MANAGED_WORKFLOW_TOOL_NAMES = ["workflow", "workflow_tasks"] as const;
+const WORKFLOW_PERMISSION_INSTRUCTION =
+  "Check workflow_status before loading tools or drafting workflow scripts. Only the human can enable access with /workflow.enable; a task request does not enable it.";
+const WORKFLOW_DISABLED_MESSAGE =
+  "WORKFLOW_DISABLED: Workflow access is disabled. Do not load tools or draft workflow scripts. Only the human can enable access with /workflow.enable.";
+type WorkflowAccess = { enabled: boolean; enableCommand: "/workflow.enable" };
 const WORKFLOW_LOAD_DESCRIPTION =
-  "Load workflow orchestration tools. Call this first when the user explicitly requests a workflow, saved workflow, multi-agent/subagent delegation, separate agents, or parallel fan-out/fan-in; or when a substantial task needs independent investigations or perspectives followed by synthesis, such as a multi-perspective review, competing-hypothesis analysis, or cross-functional dependency plan. Do not call it for ordinary single-agent work, conceptual questions, rewriting, or mere mentions of CI, business, or GitHub Actions workflows.";
+  "After workflow_status reports enabled, load tools and guidance for saved workflows, multi-agent delegation, or independent analyses followed by synthesis. Not for single-agent tasks or CI pipelines.";
 
 type WorkflowResultDetails = Partial<WorkflowSnapshot> & {
   runId?: string;
@@ -41,6 +48,79 @@ type WorkflowResultDetails = Partial<WorkflowSnapshot> & {
 };
 
 export default function extension(pi: ExtensionAPI) {
+  // Permission belongs to this live session, never to a saved branch marker.
+  let workflowEnabled = false;
+  const workflowAccess = (): WorkflowAccess => ({ enabled: workflowEnabled, enableCommand: "/workflow.enable" });
+  const requireWorkflowAccess = (): void => {
+    if (!workflowEnabled) throw new Error(WORKFLOW_DISABLED_MESSAGE);
+  };
+  const workflowAccessText = (): string => {
+    if (workflowEnabled) return "Workflow access enabled for this session.";
+    return `Workflow access disabled.${liveRuns.size ? " Accepted runs continue; /kill-workflow cancels a run." : ""}`;
+  };
+  const announceWorkflowAccess = (): void => {
+    pi.sendMessage(
+      {
+        customType: WORKFLOW_ACCESS_MESSAGE_TYPE,
+        content: workflowAccessText(),
+        display: false,
+        details: workflowAccess(),
+      },
+      // Pi queues context-only messages safely after in-flight tool results. Do
+      // not steer, trigger a turn, or modify the leading prompt/tool declarations.
+      { triggerTurn: false },
+    );
+  };
+  const guardWorkflowTool = <TArgs extends unknown[], TResult>(tool: {
+    execute: (...args: TArgs) => Promise<TResult>;
+  }): void => {
+    const execute = tool.execute.bind(tool);
+    tool.execute = async (...args: TArgs) => {
+      requireWorkflowAccess();
+      return execute(...args);
+    };
+  };
+
+  for (const enabled of [true, false]) {
+    const name = enabled ? "workflow.enable" : "workflow.disable";
+    pi.registerCommand(name, {
+      description: enabled ? "Enable workflow tool access for this session" : "Disable further workflow tool calls",
+      handler: async (args, ctx) => {
+        if (args.trim()) {
+          ctx.ui.notify(`Usage: /${name}`, "error");
+          return;
+        }
+        const changed = workflowEnabled !== enabled;
+        workflowEnabled = enabled;
+        if (changed) announceWorkflowAccess();
+        ctx.ui.notify(`${workflowAccessText()}${changed ? "" : " Already in this state."}`, "info");
+      },
+    });
+  }
+
+  const workflowStatusParameters = Type.Object({}, { additionalProperties: false });
+  const workflowStatusTool: ToolDefinition<typeof workflowStatusParameters, WorkflowAccess> = {
+    name: WORKFLOW_STATUS_TOOL_NAME,
+    label: "workflow.status",
+    description:
+      "Check permission before drafting or loading multi-agent workflows. Default off; only human /workflow.enable grants access. If disabled, work single-agent.",
+    parameters: workflowStatusParameters,
+    outputSchema: Type.Object(
+      { enabled: Type.Boolean(), enableCommand: Type.Literal("/workflow.enable") },
+      { additionalProperties: false },
+    ),
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    async execute() {
+      const access = workflowAccess();
+      return {
+        content: [{ type: "text", text: JSON.stringify(access) }],
+        structuredContent: access,
+        details: access,
+      };
+    },
+  };
+  pi.registerTool(workflowStatusTool);
+
   // Extension-owned shutdown controller. Accepted background runs are independent
   // of their originating parent-turn signal and compose this lifecycle signal so
   // quit / reload / new aborts their in-flight subagents (the handler below is
@@ -192,6 +272,7 @@ export default function extension(pi: ExtensionAPI) {
   };
 
   const activateWorkflowTools = (ctx: ExtensionContext): WorkflowActivation => {
+    requireWorkflowAccess();
     const before = pi.getActiveTools();
     const available = availableManagedTools();
     const desired = uniqueToolNames([...before, ...available]);
@@ -263,8 +344,21 @@ export default function extension(pi: ExtensionAPI) {
     },
   };
 
-  // Register the tiny bootstrap first for discoverability. The full tools are
-  // configured but become provider-visible only after additive activation.
+  // Guard execute() as well as tool_call: direct command dispatch and captured
+  // nested tool references must not bypass a later permission revocation.
+  guardWorkflowTool(workflowLoadTool);
+  workflowTool.description = `${WORKFLOW_PERMISSION_INSTRUCTION} ${workflowTool.description}`;
+  workflowTasksTool.description = `${WORKFLOW_PERMISSION_INSTRUCTION} ${workflowTasksTool.description}`;
+  guardWorkflowTool(workflowTool);
+  guardWorkflowTool(workflowTasksTool);
+  pi.on("tool_call", (event) => {
+    if (!workflowEnabled && (event.toolName === WORKFLOW_LOAD_TOOL_NAME || isManagedWorkflowTool(event.toolName))) {
+      return { block: true, reason: WORKFLOW_DISABLED_MESSAGE };
+    }
+  });
+
+  // The tiny status/bootstrap stay discoverable. Permission toggles never change
+  // the active set; full tools become provider-visible only on explicit loading.
   pi.registerTool(workflowLoadTool);
   pi.registerTool(workflowTool);
   pi.registerTool(workflowTasksTool);
@@ -400,6 +494,10 @@ export default function extension(pi: ExtensionAPI) {
       }
     },
     handler: async (args, ctx) => {
+      if (!workflowEnabled) {
+        ctx.ui.notify(WORKFLOW_DISABLED_MESSAGE, "error");
+        return;
+      }
       let registry: ReturnType<typeof loadWorkflowRegistry>;
       try {
         registry = loadWorkflowRegistry({ cwd: ctx.cwd, agentDir: tryGetAgentDir() });
@@ -418,6 +516,8 @@ export default function extension(pi: ExtensionAPI) {
       let releaseResultDelivery: (() => void) | undefined;
       try {
         await ctx.waitForIdle();
+        // Permission can be revoked while this command waits for a parent run.
+        requireWorkflowAccess();
         // Direct command dispatch has no parent agent_start/agent_settled pair.
         // Hold delivery until this handler has processed the immediate result so
         // even a workflow that finishes instantly cannot race its own launch.
@@ -510,10 +610,20 @@ export default function extension(pi: ExtensionAPI) {
   // disclosure state follows the selected branch rather than global runtime
   // state. Custom entries survive compaction and are excluded from model input.
   pi.on("session_start", (_event, ctx) => {
+    workflowEnabled = false;
     resultDelivery.startSession();
     reconcileWorkflowTools(ctx);
+    // Empty conversations already have the static default-off instruction. An
+    // existing conversation needs a reset notice to supersede any old state.
+    if (hasConversation(ctx)) announceWorkflowAccess();
   });
-  pi.on("session_tree", (_event, ctx) => reconcileWorkflowTools(ctx));
+  pi.on("session_tree", (_event, ctx) => {
+    reconcileWorkflowTools(ctx);
+    // Old notices cannot authorize anything. State remains runtime-local and the
+    // selected branch gets the current state, without rewriting its history.
+    announceWorkflowAccess();
+  });
+  pi.on("session_compact", () => announceWorkflowAccess());
   pi.on("agent_start", () => resultDelivery.agentStarted());
   pi.on("agent_settled", () => resultDelivery.agentSettled());
 
@@ -525,6 +635,7 @@ export default function extension(pi: ExtensionAPI) {
   // a fresh signal. Each settled promise is the run's own .then() (it never
   // rejects), so awaiting cannot throw.
   pi.on("session_shutdown", async () => {
+    workflowEnabled = false;
     // Close delivery before aborting runs: their abort callbacks may enqueue while
     // shutdown awaits them, and no old-session result may enter a replacement.
     resultDelivery.shutdown();
@@ -549,6 +660,15 @@ export default function extension(pi: ExtensionAPI) {
     }
     shutdownController = new AbortController();
   });
+}
+
+function hasConversation(ctx: ExtensionContext): boolean {
+  try {
+    return ctx.sessionManager.buildSessionProjection().messages.some((message) => message.role !== "system");
+  } catch {
+    // Only omit the reset notice when the public projection proves it is empty.
+    return true;
+  }
 }
 
 function workflowSnapshotFromDetails(details: WorkflowResultDetails | undefined): WorkflowSnapshot | undefined {
