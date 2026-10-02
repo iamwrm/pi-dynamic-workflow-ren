@@ -1,5 +1,10 @@
 # Changelog
 
+## Pi 1.0.0 qualification - 2026-10-02
+
+- Pin Pi-family development dependencies and locks to 1.0.0. Runtime peers, permission behavior and package version remain unchanged.
+- macOS Biome, build, extension types and 240 model-free tests pass; eight opt-in integration cases skip. No live provider call or publication.
+
 ## 1.13.1 - 2026-10-01
 
 - Shorten the two bootstrap descriptions from 1,027 to 352 characters combined. Keep status-before-drafting, human-only permission and broad delegation/synthesis discovery in the bootstrap; detailed selection examples remain in the loaded guide.
